@@ -36,6 +36,11 @@ ECC and physical-location tables belong in the next checkpoint.
 Natural physical decay is never used as deallocation. The controller invalidates
 dead data before its guarantee ends; otherwise it treats decay as a data error.
 
+The U280 vertical slice implements the data movement half of `Migrate` as a
+512-bit HLS copy between three HBM ports. Policy and expiry decisions remain in
+the host runtime at this checkpoint. Moving those decisions beside the memory
+is the next hardware boundary.
+
 ## Scaling metadata
 
 The first RTL uses arrays with an explicit reset for clarity. That is appropriate
@@ -56,4 +61,3 @@ a timer wheel and inspect only the bucket approaching its deadline.
 3. How much metadata cache bandwidth is required?
 4. Does promotion happen early enough to avoid tail failures?
 5. At what device write-energy ratio does the policy break even?
-

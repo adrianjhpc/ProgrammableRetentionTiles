@@ -54,6 +54,13 @@ struct runtime_options {
     runtime_options& poll_guard(std::uint64_t ticks);
 };
 
+struct xrt_options {
+    std::uint32_t device_index = 0;
+    std::string device_bdf;
+    std::string xclbin_path;
+    std::string migration_kernel_name = "rtmem_migrate";
+};
+
 struct policy {
     rt_policy native;
 
@@ -74,6 +81,7 @@ class runtime {
 public:
     runtime();
     explicit runtime(const runtime_options& options);
+    runtime(const runtime_options& options, const xrt_options& xrt);
 
     rt_runtime* native_handle() const noexcept;
     void advance(std::uint64_t ticks);

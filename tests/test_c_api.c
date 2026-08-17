@@ -17,6 +17,14 @@ int main(void) {
 
     rt_runtime* runtime = NULL;
     check(rt_runtime_create(&options, &runtime));
+    uint32_t host_coherent = 0;
+    check(rt_runtime_is_host_coherent(runtime, &host_coherent));
+    assert(host_coherent == 1);
+
+    rt_xrt_options xrt_options;
+    rt_xrt_options_init(&xrt_options);
+    assert(xrt_options.struct_size == sizeof(xrt_options));
+    assert(strcmp(xrt_options.migration_kernel_name, "rtmem_migrate") == 0);
 
     rt_policy policy;
     rt_policy_init(&policy, RT_CLASS_EPHEMERAL);

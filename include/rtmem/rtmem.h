@@ -82,6 +82,17 @@ typedef struct rt_runtime_options {
     uint32_t reserved;
 } rt_runtime_options;
 
+/* XRT-specific creation parameters. Strings are copied during creation. */
+typedef struct rt_xrt_options {
+    uint32_t struct_size;
+    uint32_t device_index;
+    const char* device_bdf;
+    const char* xclbin_path;
+    const char* migration_kernel_name;
+    uint32_t flags;
+    uint32_t reserved;
+} rt_xrt_options;
+
 typedef struct rt_policy {
     uint32_t struct_size;
     rt_retention_class retention_class;
@@ -133,13 +144,19 @@ typedef struct rt_buffer_info {
 } rt_buffer_info;
 
 void rt_runtime_options_init(rt_runtime_options* options);
+void rt_xrt_options_init(rt_xrt_options* options);
 void rt_policy_init(rt_policy* policy, rt_retention_class retention_class);
 const char* rt_status_string(rt_status status);
 
 rt_status rt_runtime_create(const rt_runtime_options* options,
                             rt_runtime** output_runtime);
+rt_status rt_runtime_create_xrt(const rt_runtime_options* options,
+                                const rt_xrt_options* xrt_options,
+                                rt_runtime** output_runtime);
 void rt_runtime_destroy(rt_runtime* runtime);
 const char* rt_runtime_last_error(const rt_runtime* runtime);
+rt_status rt_runtime_is_host_coherent(rt_runtime* runtime,
+                                      uint32_t* output_supported);
 rt_status rt_runtime_now(rt_runtime* runtime, uint64_t* output_tick);
 rt_status rt_runtime_advance(rt_runtime* runtime, uint64_t ticks);
 rt_status rt_runtime_poll(rt_runtime* runtime);

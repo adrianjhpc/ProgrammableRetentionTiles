@@ -113,6 +113,20 @@ runtime::runtime(const runtime_options& options)
     check(rt_runtime_create(&options.native, &state_->handle), nullptr);
 }
 
+runtime::runtime(const runtime_options& options, const xrt_options& xrt)
+    : state_(std::make_shared<detail::runtime_state>()) {
+    rt_xrt_options native_xrt{};
+    rt_xrt_options_init(&native_xrt);
+    native_xrt.device_index = xrt.device_index;
+    native_xrt.device_bdf =
+        xrt.device_bdf.empty() ? nullptr : xrt.device_bdf.c_str();
+    native_xrt.xclbin_path = xrt.xclbin_path.c_str();
+    native_xrt.migration_kernel_name = xrt.migration_kernel_name.c_str();
+    check(rt_runtime_create_xrt(
+              &options.native, &native_xrt, &state_->handle),
+          nullptr);
+}
+
 rt_runtime* runtime::native_handle() const noexcept {
     return state_->handle;
 }
@@ -276,6 +290,12 @@ struct retention_resource::impl {
 
 retention_resource::retention_resource(region& owner)
     : implementation_(std::make_unique<impl>()) {
+    std::uint32_t host_coherent = 0;
+    auto* runtime = owner.state_->runtime->handle;
+    check(rt_runtime_is_host_coherent(runtime, &host_coherent), runtime);
+    if (host_coherent == 0) {
+        raise(RT_ERROR_UNSUPPORTED, runtime);
+    }
     implementation_->region = owner.state_;
 }
 
