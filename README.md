@@ -126,5 +126,3 @@ For Quartus, set `FPGA_PART` to the exact Stratix 10 device and run:
 FPGA_PART=<exact-device> quartus_sh -t fpga/quartus_synth.tcl
 ```
 
-See `docs/architecture.md` for the design boundary and
-`docs/hardware_targets.md` for the board-specific plan.
