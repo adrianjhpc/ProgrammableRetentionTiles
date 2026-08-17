@@ -1,0 +1,23 @@
+# Fast line remains valid before its retention deadline.
+WRITE 0x0000 EPHEMERAL 0xdeadbeef
+WAIT 100
+READ 0x0000 EXPECT 0xdeadbeef
+
+# It expires once its age exceeds the 128-cycle guarantee.
+WAIT 30
+READ 0x0000 MISS
+
+# Refresh extends the deadline.
+WRITE 0x0000 EPHEMERAL 0x12345678
+WAIT 100
+REFRESH 0x0000
+WAIT 100
+READ 0x0000 EXPECT 0x12345678
+
+# Migration copies the line into a longer-retention bank.
+MIGRATE 0x0000 EPOCH
+WAIT 500
+READ 0x0000 EXPECT 0x12345678
+
+INVALIDATE 0x0000
+READ 0x0000 MISS
