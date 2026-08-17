@@ -126,15 +126,5 @@ For Quartus, set `FPGA_PART` to the exact Stratix 10 device and run:
 FPGA_PART=<exact-device> quartus_sh -t fpga/quartus_synth.tcl
 ```
 
-No board part is hard-coded because U250/U280 card revisions and Stratix 10
-boards can expose different exact device identifiers.
-
-## Recommended board order
-
-1. Run the policy core using BRAM/URAM on the U250 or U280.
-2. Bind independent logical banks to U280 HBM pseudo-channels.
-3. Replay traces at high concurrency with hardware traffic generators.
-4. Port the same core to Stratix 10 and compare implementation cost.
-
 See `docs/architecture.md` for the design boundary and
 `docs/hardware_targets.md` for the board-specific plan.
