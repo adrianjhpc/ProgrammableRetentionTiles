@@ -74,3 +74,27 @@ Retention and crash consistency are separate. `rt_buffer_flush` and
 The host emulator implements them with a sequentially consistent CPU fence.
 XRT flushes host changes to the device. Neither operation provides filesystem
 or power-failure persistence.
+
+## Workload tracing
+
+Tracing is optional and has no effect until a recorder is attached. A trace
+handle may be destroyed after attachment because the runtime retains the
+underlying writer until detachment or runtime destruction.
+
+The C interface consists of:
+
+- `rt_trace_create`, `rt_trace_flush`, and `rt_trace_destroy`;
+- `rt_runtime_attach_trace` and `rt_runtime_detach_trace`;
+- phase, compute, and barrier annotations on the runtime;
+- `rt_buffer_trace_access` for mapped-pointer instrumentation; and
+- `rt_buffer_read_bytes`/`rt_buffer_write_bytes` for portable traced access.
+
+The C++ layer provides `rtmem::trace`, runtime annotation methods, and
+`rtmem::traced_view<T>`. A traced view maps once and records each call to
+`load` or `store`; direct access to an ordinary mapped pointer remains
+unobservable.
+
+Lifecycle events are recorded automatically for buffers created while a trace
+is attached. Reclassification requested by the application becomes a `HINT`
+event. Automatic maintenance decisions made by `rt_runtime_poll` are omitted
+so the captured workload can be replayed with a different policy.

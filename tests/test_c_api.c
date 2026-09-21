@@ -96,6 +96,32 @@ int main(void) {
     check(rt_region_free_pointer(region, ordinary_pointer));
     rt_region_destroy(region);
 
+    rt_trace_options trace_options;
+    rt_trace_options_init(&trace_options, "build/test_c_api.rttrace");
+    rt_trace* trace = NULL;
+    check(rt_trace_create(&trace_options, &trace));
+    check(rt_runtime_attach_trace(runtime, trace));
+    assert(rt_runtime_attach_trace(runtime, trace) == RT_ERROR_BUSY);
+
+    rt_policy_init(&policy, RT_CLASS_EPHEMERAL);
+    check(rt_region_create(runtime, &policy, "c-trace-api", &region));
+    check(rt_alloc(region, 64, 64, &buffer));
+    const uint64_t traced_value = UINT64_C(0x123456789abcdef0);
+    uint64_t traced_read = 0;
+    check(rt_buffer_write_bytes(
+        buffer, 0, &traced_value, sizeof(traced_value), 3));
+    check(rt_runtime_trace_compute(runtime, 3, 5));
+    check(rt_buffer_read_bytes(
+        buffer, 0, &traced_read, sizeof(traced_read), 3));
+    assert(traced_read == traced_value);
+    check(rt_runtime_trace_phase(runtime, "c_api_complete"));
+    check(rt_runtime_trace_barrier(runtime, 3, 1));
+    rt_buffer_free(buffer);
+    rt_region_destroy(region);
+    check(rt_runtime_detach_trace(runtime));
+    check(rt_trace_flush(trace));
+    rt_trace_destroy(trace);
+
     rt_runtime_destroy(runtime);
     return 0;
 }

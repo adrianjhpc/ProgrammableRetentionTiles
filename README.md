@@ -10,10 +10,13 @@ programmer-visible retention classes. It provides:
 - deterministic expiry and optional stochastic retention failures;
 - refresh, migration, invalidation, capacity and energy accounting;
 - a small trace language for replaying workload memory lifetimes;
-- a vendor-neutral SystemVerilog metadata controller; and
+- a vendor-neutral SystemVerilog metadata controller;
 - synthesis entry points for AMD/Xilinx Vivado and Intel Quartus;
-- an optional native-XRT allocation and migration backend; and
-- a U280 HLS migration kernel with three independent HBM ports.
+- an optional native-XRT allocation and migration backend;
+- a U280 HLS migration kernel with three independent HBM ports;
+- a policy-independent workload tracing API and replay engine; and
+- traced matrix multiplication plus BFS, hash-join, and stencil benchmarks for
+  per-data-structure policy comparisons.
 
 The FPGA model does **not** claim to reproduce MTJ device physics. It is meant
 to determine whether retention-aware placement saves enough latency, energy and
@@ -26,6 +29,8 @@ Only a C++17 compiler and `make` are required for the reference model.
 ```sh
 make test
 make examples
+make trace-example
+make benchmarks
 ./build/retention_sim --trace traces/smoke.trace
 ```
 
@@ -39,6 +44,48 @@ include/rtmem/rtmem.hpp   C++17 RAII and std::pmr wrappers
 The default host backend is deterministic and requires no FPGA. It exercises
 the same region and buffer lifecycle as the optional XRT backend.
 See `docs/software_api.md` for lifetime, mapping and persistence semantics.
+
+## Trace a real kernel
+
+`traced_matmul` executes an actual C++ matrix multiplication while recording
+allocations, byte-range accesses, compute intervals, phases, barriers, hints,
+and frees:
+
+```sh
+./build/traced_matmul build/matmul.rttrace
+./build/retention_sim --trace build/matmul.rttrace --policy hint
+./build/retention_sim --trace build/matmul.rttrace --policy oracle
+./build/retention_sim --trace build/matmul.rttrace --policy durable
+./build/retention_sim --trace build/matmul.rttrace --policy oracle \
+  --profile profiles/large_experiment.profile
+```
+
+The same workload can therefore be replayed without rerunning the benchmark.
+The `hint` policy follows application retention hints; fixed policies place all
+buffers in one class; `oracle` uses future trace knowledge to choose the weakest
+conservative class for each buffer. See `docs/tracing.md` for the API and trace
+format.
+
+## Compare policies within one kernel
+
+`traced_structures` gives separate retention hints to the graph, mutable state,
+and scratch/output structures inside each BFS, hash-join, or stencil kernel.
+One execution creates a policy-independent trace, then the simulator replays
+that exact trace under mixed hints, fixed classes, and an oracle policy:
+
+```sh
+./build/traced_structures bfs build/bfs.rttrace
+./build/retention_sim --trace build/bfs.rttrace --policy hint
+./build/retention_sim --trace build/bfs.rttrace --policy epoch
+./build/retention_sim --trace build/bfs.rttrace --policy durable
+./build/retention_sim --trace build/bfs.rttrace --policy oracle
+```
+
+Replay output includes `structure.<name>.placement`, read/write bytes per
+structure, and traffic/peak-live-byte totals per retention class. Run all three
+kernels against all five policies with `make benchmarks`. See
+`docs/benchmarks.md` for the policy map, expected default-profile results, and
+interpretation rules.
 
 ## U280 vertical slice
 
@@ -104,10 +151,13 @@ test completes quickly:
 | `EPOCH` | 64 lines | 4,096 cycles | 3 cycles | 4 cycles |
 | `DURABLE` | 64 lines | effectively infinite | 4 cycles | 12 cycles |
 
-These are experimental parameters, not device predictions. Change them in
-`sim/retention_model.cpp` after measured or modelled device data is available.
+These are experimental parameters, not device predictions. Pass
+`--profile profiles/default.profile` explicitly, copy that file, and edit its
+capacity, retention, latency, and energy fields when measured or modeled device
+data becomes available. `profiles/large_experiment.profile` keeps the same
+costs but expands capacity for larger traces.
 
-## Trace language
+## Legacy trace language
 
 Addresses are byte addresses and are converted to 64-byte logical lines.
 
@@ -128,6 +178,9 @@ Numbers may be decimal or use the `0x` hexadecimal prefix. Comments start with
 Use `--mode stochastic --seed N` to replace deterministic expiry with a simple
 exponential failure process. Deterministic mode is the preferred mode while
 debugging policies.
+
+The recorder produces the newer `RTTRACE 2` workload format. The simulator
+auto-detects both formats.
 
 ## RTL
 

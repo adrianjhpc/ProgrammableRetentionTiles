@@ -1,6 +1,7 @@
 #include "rtmem/rtmem.h"
 
 #include "backend.hpp"
+#include "trace_writer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -38,6 +39,12 @@ struct rt_buffer {
     std::uint64_t created_tick = 0;
     std::uint64_t last_write_tick = 0;
     std::uint64_t generation = 0;
+    std::uint64_t trace_id = 0;
+    bool trace_live = true;
+};
+
+struct rt_trace {
+    std::shared_ptr<rtmem::internal::trace_writer> writer;
 };
 
 struct rt_region {
@@ -55,6 +62,7 @@ struct rt_runtime {
     mutable std::mutex mutex;
     std::chrono::steady_clock::time_point start_time;
     std::uint64_t manual_tick = 0;
+    std::shared_ptr<rtmem::internal::trace_writer> trace;
     std::vector<rt_region*> regions;
     rt_runtime_stats stats{};
     std::array<char, 256> last_error{};
@@ -63,6 +71,7 @@ struct rt_runtime {
 namespace {
 
 constexpr std::uint64_t kInfinite = RTMEM_INFINITE_TICKS;
+std::atomic<std::uint64_t> g_next_trace_buffer_id{1};
 
 bool valid_class(rt_retention_class retention_class) {
     return retention_class >= RT_CLASS_EPHEMERAL &&
@@ -118,6 +127,31 @@ std::uint64_t total_active_bytes(const rt_runtime_stats& stats) {
         total += stats.active_bytes[index];
     }
     return total;
+}
+
+bool trace_free_locked(rt_buffer* buffer) {
+    if (!buffer->trace_live) {
+        return true;
+    }
+    auto* runtime = buffer->runtime;
+    if (runtime->trace == nullptr) {
+        buffer->trace_live = false;
+        return true;
+    }
+    if (!runtime->trace->free(now_locked(runtime), buffer->trace_id)) {
+        return false;
+    }
+    buffer->trace_live = false;
+    return true;
+}
+
+bool trace_hint_locked(rt_buffer* buffer,
+                       rt_retention_class destination_class) {
+    auto* runtime = buffer->runtime;
+    return runtime->trace == nullptr ||
+           runtime->trace->hint(now_locked(runtime),
+                                buffer->trace_id,
+                                destination_class);
 }
 
 void release_storage_locked(rt_buffer* buffer, rt_buffer_state new_state) {
@@ -183,7 +217,8 @@ rt_status capacity_check_locked(rt_runtime* runtime,
 }
 
 rt_status reclassify_locked(rt_buffer* buffer,
-                            rt_retention_class destination_class) {
+                            rt_retention_class destination_class,
+                            bool record_hint) {
     const auto active = validate_active_locked(buffer);
     if (active != RT_OK) {
         return active;
@@ -197,6 +232,11 @@ rt_status reclassify_locked(rt_buffer* buffer,
         return set_error(buffer->runtime,
                          RT_ERROR_BUSY,
                          "cannot reclassify a mapped buffer");
+    }
+    if (record_hint && !trace_hint_locked(buffer, destination_class)) {
+        return set_error(buffer->runtime,
+                         RT_ERROR_BACKEND,
+                         buffer->runtime->trace->last_error());
     }
     if (destination_class == buffer->retention_class) {
         buffer->last_write_tick = now_locked(buffer->runtime);
@@ -282,7 +322,7 @@ rt_status maintain_locked(rt_buffer* buffer, std::uint64_t now) {
             return RT_OK;
         case RT_EXPIRY_PROMOTE: {
             const auto result =
-                reclassify_locked(buffer, buffer->promotion_target);
+                reclassify_locked(buffer, buffer->promotion_target, false);
             if (result == RT_ERROR_CAPACITY &&
                 buffer->guarantee != RT_GUARANTEE_REQUIRED) {
                 buffer->last_write_tick = now;
@@ -302,6 +342,7 @@ void end_region_locked(rt_region* region) {
         return;
     }
     for (auto* buffer : region->buffers) {
+        trace_free_locked(buffer);
         if (buffer->state == RT_BUFFER_ACTIVE) {
             release_storage_locked(buffer, RT_BUFFER_INVALID);
             region->runtime->stats.invalidations++;
@@ -365,22 +406,28 @@ rt_status create_runtime(const rt_runtime_options* options,
     }
 
     try {
-        auto runtime = std::make_unique<rt_runtime>();
-        runtime->options = selected;
-        if (selected.backend == RT_BACKEND_XRT) {
-            runtime->backend = rtmem::internal::make_xrt_backend(*xrt_options);
-        } else {
-            runtime->backend = rtmem::internal::make_host_backend();
-        }
-        runtime->start_time = std::chrono::steady_clock::now();
-        runtime->stats.struct_size = sizeof(rt_runtime_stats);
-        *output_runtime = runtime.release();
-        return RT_OK;
-    } catch (const std::bad_alloc&) {
-        return RT_ERROR_NO_MEMORY;
-    } catch (const std::exception&) {
-        return RT_ERROR_BACKEND;
+    auto runtime = std::make_unique<rt_runtime>();
+    runtime->options = selected;
+
+    if (selected.backend == RT_BACKEND_XRT) {
+        runtime->backend =
+            rtmem::internal::make_xrt_backend(*xrt_options);
+    } else {
+        runtime->backend = rtmem::internal::make_host_backend();
     }
+
+    runtime->start_time = std::chrono::steady_clock::now();
+    runtime->stats.struct_size = sizeof(rt_runtime_stats);
+    *output_runtime = runtime.release();
+    return RT_OK;
+} catch (const std::bad_alloc&) {
+    return RT_ERROR_NO_MEMORY;
+} catch (const std::exception& exception) {
+    std::fprintf(stderr,
+                 "XRT backend initialization failed: %s\n",
+                 exception.what());
+    return RT_ERROR_BACKEND;
+}
 }
 
 }  // namespace
@@ -410,6 +457,64 @@ void rt_xrt_options_init(rt_xrt_options* options) {
     std::memset(options, 0, sizeof(*options));
     options->struct_size = sizeof(*options);
     options->migration_kernel_name = "rtmem_migrate";
+}
+
+void rt_trace_options_init(rt_trace_options* options, const char* path) {
+    if (options == nullptr) {
+        return;
+    }
+    std::memset(options, 0, sizeof(*options));
+    options->struct_size = sizeof(*options);
+    options->path = path;
+}
+
+rt_status rt_trace_create(const rt_trace_options* options,
+                          rt_trace** output_trace) {
+    if (output_trace == nullptr) {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    *output_trace = nullptr;
+    if (options == nullptr ||
+        options->struct_size < sizeof(rt_trace_options) ||
+        options->path == nullptr || options->path[0] == '\0' ||
+        (options->flags & ~RT_TRACE_FLUSH_EACH_EVENT) != 0) {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    try {
+        auto trace = std::make_unique<rt_trace>();
+        trace->writer = std::make_shared<rtmem::internal::trace_writer>(
+            options->path, options->flags);
+        *output_trace = trace.release();
+        return RT_OK;
+    } catch (const std::bad_alloc&) {
+        return RT_ERROR_NO_MEMORY;
+    } catch (const std::exception&) {
+        return RT_ERROR_BACKEND;
+    }
+}
+
+void rt_trace_destroy(rt_trace* trace) {
+    if (trace == nullptr) {
+        return;
+    }
+    if (trace->writer != nullptr) {
+        trace->writer->flush();
+    }
+    delete trace;
+}
+
+const char* rt_trace_last_error(const rt_trace* trace) {
+    if (trace == nullptr || trace->writer == nullptr) {
+        return "invalid trace";
+    }
+    return trace->writer->last_error();
+}
+
+rt_status rt_trace_flush(rt_trace* trace) {
+    if (trace == nullptr || trace->writer == nullptr) {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    return trace->writer->flush() ? RT_OK : RT_ERROR_BACKEND;
 }
 
 void rt_policy_init(rt_policy* policy, rt_retention_class retention_class) {
@@ -505,6 +610,117 @@ rt_status rt_runtime_is_host_coherent(rt_runtime* runtime,
     *output_supported = runtime->backend->supports_host_coherent_pointer()
                             ? 1u
                             : 0u;
+    return RT_OK;
+}
+
+rt_status rt_runtime_attach_trace(rt_runtime* runtime, rt_trace* trace) {
+    if (runtime == nullptr || trace == nullptr || trace->writer == nullptr) {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(runtime->mutex);
+    if (runtime->trace != nullptr) {
+        return set_error(runtime,
+                         RT_ERROR_BUSY,
+                         "runtime already has an attached trace");
+    }
+    runtime->trace = trace->writer;
+    for (auto* region : runtime->regions) {
+        for (auto* buffer : region->buffers) {
+            if (!buffer->trace_live) {
+                continue;
+            }
+            if (!runtime->trace->allocation(buffer->created_tick,
+                                            buffer->trace_id,
+                                            buffer->size_bytes,
+                                            buffer->alignment,
+                                            buffer->retention_class,
+                                            region->debug_name)) {
+                const auto* message = runtime->trace->last_error();
+                runtime->trace.reset();
+                return set_error(runtime, RT_ERROR_BACKEND, message);
+            }
+        }
+    }
+    return RT_OK;
+}
+
+rt_status rt_runtime_detach_trace(rt_runtime* runtime) {
+    if (runtime == nullptr) {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(runtime->mutex);
+    if (runtime->trace != nullptr) {
+        for (auto* region : runtime->regions) {
+            for (auto* buffer : region->buffers) {
+                if (buffer->trace_live &&
+                    !runtime->trace->free(now_locked(runtime),
+                                          buffer->trace_id)) {
+                    return set_error(runtime,
+                                     RT_ERROR_BACKEND,
+                                     runtime->trace->last_error());
+                }
+            }
+        }
+        if (!runtime->trace->flush()) {
+            return set_error(runtime,
+                             RT_ERROR_BACKEND,
+                             runtime->trace->last_error());
+        }
+    }
+    runtime->trace.reset();
+    return RT_OK;
+}
+
+rt_status rt_runtime_trace_phase(rt_runtime* runtime, const char* name) {
+    if (runtime == nullptr || name == nullptr || name[0] == '\0') {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(runtime->mutex);
+    if (runtime->trace == nullptr) {
+        return RT_OK;
+    }
+    if (!runtime->trace->phase(now_locked(runtime), name)) {
+        return set_error(runtime,
+                         RT_ERROR_BACKEND,
+                         runtime->trace->last_error());
+    }
+    return RT_OK;
+}
+
+rt_status rt_runtime_trace_compute(rt_runtime* runtime,
+                                   uint32_t stream_id,
+                                   uint64_t cycles) {
+    if (runtime == nullptr) {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(runtime->mutex);
+    if (runtime->trace == nullptr) {
+        return RT_OK;
+    }
+    if (!runtime->trace->compute(now_locked(runtime), stream_id, cycles)) {
+        return set_error(runtime,
+                         RT_ERROR_BACKEND,
+                         runtime->trace->last_error());
+    }
+    return RT_OK;
+}
+
+rt_status rt_runtime_trace_barrier(rt_runtime* runtime,
+                                   uint32_t stream_id,
+                                   uint64_t barrier_id) {
+    if (runtime == nullptr) {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(runtime->mutex);
+    if (runtime->trace == nullptr) {
+        return RT_OK;
+    }
+    if (!runtime->trace->barrier(
+            now_locked(runtime), stream_id, barrier_id)) {
+        return set_error(runtime,
+                         RT_ERROR_BACKEND,
+                         runtime->trace->last_error());
+    }
     return RT_OK;
 }
 
@@ -752,7 +968,8 @@ rt_status rt_region_reclassify(rt_region* region,
         return capacity;
     }
     for (auto* buffer : region->buffers) {
-        const auto status = reclassify_locked(buffer, destination_class);
+        const auto status =
+            reclassify_locked(buffer, destination_class, true);
         if (status != RT_OK) {
             return status;
         }
@@ -822,6 +1039,11 @@ rt_status rt_region_free_pointer(rt_region* region, void* pointer) {
                          RT_ERROR_BUSY,
                          "cannot free a mapped pointer");
     }
+    if (!trace_free_locked(buffer)) {
+        return set_error(runtime,
+                         RT_ERROR_BACKEND,
+                         runtime->trace->last_error());
+    }
     if (buffer->state == RT_BUFFER_ACTIVE) {
         release_storage_locked(buffer, RT_BUFFER_INVALID);
     }
@@ -869,7 +1091,24 @@ rt_status rt_alloc(rt_region* region,
         buffer->promotion_target = region->policy.promotion_target;
         buffer->created_tick = now_locked(runtime);
         buffer->last_write_tick = buffer->created_tick;
+        buffer->trace_id =
+            g_next_trace_buffer_id.fetch_add(1, std::memory_order_relaxed);
         region->buffers.push_back(buffer);
+
+        if (runtime->trace != nullptr &&
+            !runtime->trace->allocation(buffer->created_tick,
+                                        buffer->trace_id,
+                                        buffer->size_bytes,
+                                        buffer->alignment,
+                                        buffer->retention_class,
+                                        region->debug_name)) {
+            region->buffers.pop_back();
+            const auto* message = runtime->trace->last_error();
+            delete buffer;
+            buffer = nullptr;
+            runtime->stats.allocation_failures++;
+            return set_error(runtime, RT_ERROR_BACKEND, message);
+        }
 
         runtime->stats.allocations++;
         runtime->stats.active_buffers++;
@@ -910,6 +1149,7 @@ void rt_buffer_free(rt_buffer* buffer) {
     if (buffer->state == RT_BUFFER_ACTIVE) {
         release_storage_locked(buffer, RT_BUFFER_INVALID);
     }
+    trace_free_locked(buffer);
     erase_buffer_locked(region, buffer);
     delete buffer;
 }
@@ -1018,7 +1258,7 @@ rt_status rt_buffer_reclassify(rt_buffer* buffer,
         return RT_ERROR_INVALID_ARGUMENT;
     }
     std::lock_guard<std::mutex> lock(buffer->runtime->mutex);
-    return reclassify_locked(buffer, destination_class);
+    return reclassify_locked(buffer, destination_class, true);
 }
 
 rt_status rt_buffer_promote(rt_buffer* buffer,
@@ -1032,7 +1272,7 @@ rt_status rt_buffer_promote(rt_buffer* buffer,
                          RT_ERROR_INVALID_ARGUMENT,
                          "promotion target must be a stronger class");
     }
-    return reclassify_locked(buffer, destination_class);
+    return reclassify_locked(buffer, destination_class, true);
 }
 
 rt_status rt_buffer_invalidate(rt_buffer* buffer) {
@@ -1048,6 +1288,11 @@ rt_status rt_buffer_invalidate(rt_buffer* buffer) {
         return set_error(buffer->runtime,
                          RT_ERROR_BUSY,
                          "cannot invalidate a mapped buffer");
+    }
+    if (!trace_free_locked(buffer)) {
+        return set_error(buffer->runtime,
+                         RT_ERROR_BACKEND,
+                         buffer->runtime->trace->last_error());
     }
     release_storage_locked(buffer, RT_BUFFER_INVALID);
     buffer->runtime->stats.invalidations++;
@@ -1127,6 +1372,101 @@ rt_status rt_buffer_get_info(rt_buffer* buffer,
         }
     }
     return RT_OK;
+}
+
+rt_status rt_buffer_trace_access(rt_buffer* buffer,
+                                 rt_trace_access_kind kind,
+                                 size_t offset_bytes,
+                                 size_t size_bytes,
+                                 uint32_t stream_id) {
+    if (buffer == nullptr || size_bytes == 0 ||
+        (kind != RT_TRACE_ACCESS_READ &&
+         kind != RT_TRACE_ACCESS_WRITE)) {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(buffer->runtime->mutex);
+    const auto active = validate_active_locked(buffer);
+    if (active != RT_OK) {
+        return active;
+    }
+    if (offset_bytes > buffer->size_bytes ||
+        size_bytes > buffer->size_bytes - offset_bytes) {
+        return set_error(buffer->runtime,
+                         RT_ERROR_INVALID_ARGUMENT,
+                         "traced access exceeds buffer bounds");
+    }
+    if (buffer->runtime->trace == nullptr) {
+        return RT_OK;
+    }
+    if (!buffer->runtime->trace->access(now_locked(buffer->runtime),
+                                        stream_id,
+                                        kind,
+                                        buffer->trace_id,
+                                        offset_bytes,
+                                        size_bytes)) {
+        return set_error(buffer->runtime,
+                         RT_ERROR_BACKEND,
+                         buffer->runtime->trace->last_error());
+    }
+    return RT_OK;
+}
+
+rt_status rt_buffer_read_bytes(rt_buffer* buffer,
+                               size_t offset_bytes,
+                               void* output,
+                               size_t size_bytes,
+                               uint32_t stream_id) {
+    if (buffer == nullptr || output == nullptr || size_bytes == 0 ||
+        offset_bytes > buffer->size_bytes ||
+        size_bytes > buffer->size_bytes - offset_bytes) {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    void* mapping = nullptr;
+    auto status = rt_buffer_map(buffer, RT_MAP_READ, &mapping);
+    if (status != RT_OK) {
+        return status;
+    }
+    std::memcpy(output,
+                static_cast<const unsigned char*>(mapping) + offset_bytes,
+                size_bytes);
+    status = rt_buffer_unmap(buffer);
+    if (status != RT_OK) {
+        return status;
+    }
+    return rt_buffer_trace_access(buffer,
+                                  RT_TRACE_ACCESS_READ,
+                                  offset_bytes,
+                                  size_bytes,
+                                  stream_id);
+}
+
+rt_status rt_buffer_write_bytes(rt_buffer* buffer,
+                                size_t offset_bytes,
+                                const void* input,
+                                size_t size_bytes,
+                                uint32_t stream_id) {
+    if (buffer == nullptr || input == nullptr || size_bytes == 0 ||
+        offset_bytes > buffer->size_bytes ||
+        size_bytes > buffer->size_bytes - offset_bytes) {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    void* mapping = nullptr;
+    auto status = rt_buffer_map(buffer, RT_MAP_WRITE, &mapping);
+    if (status != RT_OK) {
+        return status;
+    }
+    std::memcpy(static_cast<unsigned char*>(mapping) + offset_bytes,
+                input,
+                size_bytes);
+    status = rt_buffer_unmap(buffer);
+    if (status != RT_OK) {
+        return status;
+    }
+    return rt_buffer_trace_access(buffer,
+                                  RT_TRACE_ACCESS_WRITE,
+                                  offset_bytes,
+                                  size_bytes,
+                                  stream_id);
 }
 
 }  // extern "C"

@@ -14,6 +14,7 @@ extern "C" {
 typedef struct rt_runtime rt_runtime;
 typedef struct rt_region rt_region;
 typedef struct rt_buffer rt_buffer;
+typedef struct rt_trace rt_trace;
 
 typedef enum rt_status {
     RT_OK = 0,
@@ -69,6 +70,16 @@ typedef enum rt_map_flags {
     RT_MAP_WRITE = 1u << 1
 } rt_map_flags;
 
+typedef enum rt_trace_access_kind {
+    RT_TRACE_ACCESS_READ = 0,
+    RT_TRACE_ACCESS_WRITE = 1
+} rt_trace_access_kind;
+
+typedef enum rt_trace_flags {
+    RT_TRACE_DEFAULT = 0,
+    RT_TRACE_FLUSH_EACH_EVENT = 1u << 0
+} rt_trace_flags;
+
 typedef struct rt_runtime_options {
     uint32_t struct_size;
     uint32_t api_version;
@@ -92,6 +103,13 @@ typedef struct rt_xrt_options {
     uint32_t flags;
     uint32_t reserved;
 } rt_xrt_options;
+
+typedef struct rt_trace_options {
+    uint32_t struct_size;
+    const char* path;
+    uint32_t flags;
+    uint32_t reserved;
+} rt_trace_options;
 
 typedef struct rt_policy {
     uint32_t struct_size;
@@ -145,8 +163,15 @@ typedef struct rt_buffer_info {
 
 void rt_runtime_options_init(rt_runtime_options* options);
 void rt_xrt_options_init(rt_xrt_options* options);
+void rt_trace_options_init(rt_trace_options* options, const char* path);
 void rt_policy_init(rt_policy* policy, rt_retention_class retention_class);
 const char* rt_status_string(rt_status status);
+
+rt_status rt_trace_create(const rt_trace_options* options,
+                          rt_trace** output_trace);
+void rt_trace_destroy(rt_trace* trace);
+const char* rt_trace_last_error(const rt_trace* trace);
+rt_status rt_trace_flush(rt_trace* trace);
 
 rt_status rt_runtime_create(const rt_runtime_options* options,
                             rt_runtime** output_runtime);
@@ -157,6 +182,16 @@ void rt_runtime_destroy(rt_runtime* runtime);
 const char* rt_runtime_last_error(const rt_runtime* runtime);
 rt_status rt_runtime_is_host_coherent(rt_runtime* runtime,
                                       uint32_t* output_supported);
+rt_status rt_runtime_attach_trace(rt_runtime* runtime, rt_trace* trace);
+rt_status rt_runtime_detach_trace(rt_runtime* runtime);
+/* Trace annotations do not advance the live runtime clock. */
+rt_status rt_runtime_trace_phase(rt_runtime* runtime, const char* name);
+rt_status rt_runtime_trace_compute(rt_runtime* runtime,
+                                   uint32_t stream_id,
+                                   uint64_t cycles);
+rt_status rt_runtime_trace_barrier(rt_runtime* runtime,
+                                   uint32_t stream_id,
+                                   uint64_t barrier_id);
 rt_status rt_runtime_now(rt_runtime* runtime, uint64_t* output_tick);
 rt_status rt_runtime_advance(rt_runtime* runtime, uint64_t ticks);
 rt_status rt_runtime_poll(rt_runtime* runtime);
@@ -205,6 +240,22 @@ rt_status rt_buffer_device_address(rt_buffer* buffer,
                                    uint64_t* output_address);
 rt_status rt_buffer_get_info(rt_buffer* buffer,
                              rt_buffer_info* output_info);
+/* Records an application access; it does not perform the access itself. */
+rt_status rt_buffer_trace_access(rt_buffer* buffer,
+                                 rt_trace_access_kind kind,
+                                 size_t offset_bytes,
+                                 size_t size_bytes,
+                                 uint32_t stream_id);
+rt_status rt_buffer_read_bytes(rt_buffer* buffer,
+                               size_t offset_bytes,
+                               void* output,
+                               size_t size_bytes,
+                               uint32_t stream_id);
+rt_status rt_buffer_write_bytes(rt_buffer* buffer,
+                                size_t offset_bytes,
+                                const void* input,
+                                size_t size_bytes,
+                                uint32_t stream_id);
 
 #ifdef __cplusplus
 }

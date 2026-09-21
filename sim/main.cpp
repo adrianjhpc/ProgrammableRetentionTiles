@@ -1,4 +1,6 @@
 #include "retention_model.hpp"
+#include "device_profile.hpp"
+#include "workload_trace.hpp"
 
 #include <fstream>
 #include <iostream>
@@ -35,13 +37,16 @@ std::vector<std::string> tokens(const std::string& line) {
     return result;
 }
 
-bool run_trace(const std::string& path, ErrorMode mode, std::uint64_t seed) {
+bool run_trace(const std::string& path,
+               ErrorMode mode,
+               std::uint64_t seed,
+               const rtmem::BankConfigs& configs) {
     std::ifstream input(path);
     if (!input) {
         throw std::runtime_error("cannot open trace: " + path);
     }
 
-    RetentionMemory memory(mode, seed);
+    RetentionMemory memory(configs, mode, seed);
     std::string line;
     std::size_t line_number = 0;
     std::size_t checks = 0;
@@ -210,7 +215,8 @@ bool self_test() {
 void usage(const char* executable) {
     std::cerr << "usage: " << executable
               << " --self-test | --trace FILE [--mode deterministic|stochastic]"
-                 " [--seed N]\n";
+                 " [--seed N] [--policy hint|ephemeral|epoch|durable|oracle]"
+                 " [--profile FILE]\n";
 }
 
 }  // namespace
@@ -219,6 +225,8 @@ int main(int argc, char** argv) {
     std::string trace_path;
     ErrorMode mode = ErrorMode::Deterministic;
     std::uint64_t seed = 1;
+    rtmem::ReplayPolicy policy = rtmem::ReplayPolicy::Hint;
+    std::string profile_path;
     bool run_self_test = false;
 
     for (int index = 1; index < argc; ++index) {
@@ -239,6 +247,10 @@ int main(int argc, char** argv) {
             }
         } else if (argument == "--seed" && index + 1 < argc) {
             seed = parse_number(argv[++index]);
+        } else if (argument == "--policy" && index + 1 < argc) {
+            policy = rtmem::parse_replay_policy(argv[++index]);
+        } else if (argument == "--profile" && index + 1 < argc) {
+            profile_path = argv[++index];
         } else {
             usage(argv[0]);
             return 2;
@@ -250,7 +262,21 @@ int main(int argc, char** argv) {
             return self_test() ? 0 : 1;
         }
         if (!trace_path.empty()) {
-            return run_trace(trace_path, mode, seed) ? 0 : 1;
+            const auto configs = profile_path.empty()
+                                     ? rtmem::default_bank_configs()
+                                     : rtmem::load_device_profile(profile_path);
+            if (rtmem::is_workload_trace(trace_path)) {
+                return rtmem::run_workload_trace(trace_path,
+                                                 policy,
+                                                 mode,
+                                                 seed,
+                                                 configs,
+                                                 std::cout,
+                                                 std::cerr)
+                           ? 0
+                           : 1;
+            }
+            return run_trace(trace_path, mode, seed, configs) ? 0 : 1;
         }
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

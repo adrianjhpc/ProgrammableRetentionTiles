@@ -34,6 +34,8 @@ struct BankConfig {
     double write_energy_pj = 0.0;
 };
 
+using BankConfigs = std::array<BankConfig, 3>;
+
 struct Result {
     bool ok = false;
     bool expired = false;
@@ -59,6 +61,9 @@ class RetentionMemory {
 public:
     explicit RetentionMemory(ErrorMode mode = ErrorMode::Deterministic,
                              std::uint64_t seed = 1);
+    RetentionMemory(const BankConfigs& configs,
+                    ErrorMode mode = ErrorMode::Deterministic,
+                    std::uint64_t seed = 1);
 
     Result write(std::uint64_t byte_address,
                  RetentionClass requested_class,
@@ -114,6 +119,6 @@ private:
 
 std::string to_string(RetentionClass retention_class);
 RetentionClass parse_retention_class(const std::string& text);
+BankConfigs default_bank_configs();
 
 }  // namespace rtmem
-

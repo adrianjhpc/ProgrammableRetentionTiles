@@ -27,10 +27,15 @@ BankConfig durable_config() {
 }  // namespace
 
 RetentionMemory::RetentionMemory(ErrorMode mode, std::uint64_t seed)
+    : RetentionMemory(default_bank_configs(), mode, seed) {}
+
+RetentionMemory::RetentionMemory(const BankConfigs& configs,
+                                 ErrorMode mode,
+                                 std::uint64_t seed)
     : error_mode_(mode), rng_(seed) {
-    banks_[0].config = ephemeral_config();
-    banks_[1].config = epoch_config();
-    banks_[2].config = durable_config();
+    for (std::size_t index = 0; index < banks_.size(); ++index) {
+        banks_[index].config = configs[index];
+    }
     for (auto& bank : banks_) {
         bank.lines.resize(bank.config.capacity_lines);
     }
@@ -296,5 +301,8 @@ RetentionClass parse_retention_class(const std::string& text) {
     throw std::invalid_argument("unknown retention class: " + text);
 }
 
-}  // namespace rtmem
+BankConfigs default_bank_configs() {
+    return {ephemeral_config(), epoch_config(), durable_config()};
+}
 
+}  // namespace rtmem

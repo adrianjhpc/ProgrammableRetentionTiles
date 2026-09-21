@@ -61,3 +61,14 @@ a timer wheel and inspect only the bucket approaching its deadline.
 3. How much metadata cache bandwidth is required?
 4. Does promotion happen early enough to avoid tail failures?
 5. At what device write-energy ratio does the policy break even?
+
+## Workload evaluation path
+
+The `RTTRACE 2` recorder captures policy-independent allocation, access,
+compute, synchronization, hint, and free events from instrumented benchmark
+kernels. Replay assigns synthetic line addresses and applies a selected
+retention placement policy before using the cycle/energy model above.
+
+This boundary keeps benchmark behavior fixed while policies and device
+parameters change. It also makes unsafe configurations explicit through
+expired or capacity-failed accesses instead of silently repairing the trace.

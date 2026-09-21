@@ -27,6 +27,21 @@ void check(rt_status status, rt_runtime* runtime) {
     }
 }
 
+void check_trace(rt_status status, rt_trace* trace) {
+    if (status == RT_OK) {
+        return;
+    }
+    std::ostringstream message;
+    message << rt_status_string(status);
+    if (trace != nullptr) {
+        const char* detail = rt_trace_last_error(trace);
+        if (detail != nullptr && *detail != '\0') {
+            message << ": " << detail;
+        }
+    }
+    throw error(status, message.str());
+}
+
 rt_retention_class native(retention_class selected) {
     return static_cast<rt_retention_class>(selected);
 }
@@ -56,6 +71,39 @@ struct region_state {
 
 error::error(rt_status status, const std::string& message)
     : std::runtime_error(message), status_(status) {}
+
+trace::trace(std::string path, std::uint32_t flags) {
+    rt_trace_options options{};
+    rt_trace_options_init(&options, path.c_str());
+    options.flags = flags;
+    check_trace(rt_trace_create(&options, &handle_), nullptr);
+}
+
+trace::~trace() {
+    reset();
+}
+
+trace::trace(trace&& other) noexcept : handle_(other.handle_) {
+    other.handle_ = nullptr;
+}
+
+trace& trace::operator=(trace&& other) noexcept {
+    if (this != &other) {
+        reset();
+        handle_ = other.handle_;
+        other.handle_ = nullptr;
+    }
+    return *this;
+}
+
+void trace::reset() noexcept {
+    rt_trace_destroy(handle_);
+    handle_ = nullptr;
+}
+
+void trace::flush() {
+    check_trace(rt_trace_flush(handle_), handle_);
+}
 
 runtime_options::runtime_options() {
     rt_runtime_options_init(&native);
@@ -141,6 +189,33 @@ void runtime::poll() {
 
 void runtime::fence() {
     check(rt_runtime_fence(state_->handle), state_->handle);
+}
+
+void runtime::attach_trace(trace& recorder) {
+    check(rt_runtime_attach_trace(state_->handle, recorder.native_handle()),
+          state_->handle);
+}
+
+void runtime::detach_trace() {
+    check(rt_runtime_detach_trace(state_->handle), state_->handle);
+}
+
+void runtime::trace_phase(const std::string& name) {
+    check(rt_runtime_trace_phase(state_->handle, name.c_str()),
+          state_->handle);
+}
+
+void runtime::trace_compute(std::uint64_t cycles,
+                            std::uint32_t stream_id) {
+    check(rt_runtime_trace_compute(state_->handle, stream_id, cycles),
+          state_->handle);
+}
+
+void runtime::trace_barrier(std::uint64_t barrier_id,
+                            std::uint32_t stream_id) {
+    check(rt_runtime_trace_barrier(
+              state_->handle, stream_id, barrier_id),
+          state_->handle);
 }
 
 std::uint64_t runtime::now() const {
@@ -274,6 +349,42 @@ rt_buffer_info buffer::info() const {
     result.struct_size = sizeof(result);
     check(rt_buffer_get_info(handle_, &result), region_->runtime->handle);
     return result;
+}
+
+void buffer::trace_access(rt_trace_access_kind kind,
+                          std::size_t offset_bytes,
+                          std::size_t size_bytes,
+                          std::uint32_t stream_id) {
+    check(rt_buffer_trace_access(handle_,
+                                 kind,
+                                 offset_bytes,
+                                 size_bytes,
+                                 stream_id),
+          region_->runtime->handle);
+}
+
+void buffer::read_bytes(std::size_t offset_bytes,
+                        void* output,
+                        std::size_t size_bytes,
+                        std::uint32_t stream_id) {
+    check(rt_buffer_read_bytes(handle_,
+                               offset_bytes,
+                               output,
+                               size_bytes,
+                               stream_id),
+          region_->runtime->handle);
+}
+
+void buffer::write_bytes(std::size_t offset_bytes,
+                         const void* input,
+                         std::size_t size_bytes,
+                         std::uint32_t stream_id) {
+    check(rt_buffer_write_bytes(handle_,
+                                offset_bytes,
+                                input,
+                                size_bytes,
+                                stream_id),
+          region_->runtime->handle);
 }
 
 struct retention_resource::impl {
