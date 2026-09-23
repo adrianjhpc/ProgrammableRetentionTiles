@@ -86,6 +86,11 @@ int main(void) {
     assert(stats.expiry_events == 1);
     assert(stats.active_buffers == 0);
 
+    rt_backend_stats backend_stats = {0};
+    backend_stats.struct_size = sizeof(backend_stats);
+    check(rt_runtime_get_backend_stats(runtime, &backend_stats));
+    assert(backend_stats.struct_size == sizeof(backend_stats));
+
     rt_policy_init(&policy, RT_CLASS_EPOCH);
     check(rt_region_create(runtime, &policy, "pointer-api", &region));
     void* ordinary_pointer = NULL;

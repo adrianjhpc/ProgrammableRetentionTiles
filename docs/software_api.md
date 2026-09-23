@@ -67,6 +67,20 @@ region lifetime remains the authoritative semantic boundary.
 runtime with `RT_ERROR_UNSUPPORTED`. Use explicit buffer map/unmap boundaries
 there. `rt_runtime_is_host_coherent` lets adapters test this capability.
 
+## Backend instrumentation
+
+`rt_runtime_get_backend_stats` returns cumulative host-monotonic timing and
+byte counters for backend allocation, host-to-device synchronization,
+device-to-host synchronization, migration destination allocation, kernel
+submission, and migration wait. The C++ wrapper is
+`rtmem::runtime::backend_stats()`.
+
+For XRT, the wait counter includes device execution and queueing observed by
+the host. It is not an on-device cycle counter. Callers can snapshot the
+structure before and after one operation to obtain phase deltas. The host
+emulator returns a valid zero-filled structure because it performs no device
+transport.
+
 ## Persistence
 
 Retention and crash consistency are separate. `rt_buffer_flush` and

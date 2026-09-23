@@ -16,6 +16,11 @@ kernel argument. `rt_buffer_promote` allocates a destination object, invokes
 `rtmem_migrate`, waits for completion, and then replaces the buffer's physical
 allocation. The example verifies the contents after both promotions.
 
+Migration destinations are created without the normal zero-fill/upload step
+because the copy kernel overwrites every padded word. Backend instrumentation
+exposes BO allocation, synchronization, submission, and wait time through
+`rt_runtime_get_backend_stats`.
+
 This is a topology and software-semantics experiment. U280 HBM does not have
 the variable-retention or write-pulse behavior of STT/SST RAM.
 
@@ -43,6 +48,8 @@ that flow. The result is
 The relevant sources are:
 
 - `fpga/u280/rtmem_migrate.cpp`: one pipelined 512-bit word copy per loop;
+- `fpga/u280/rtmem_blocked_matmul.cpp`: durable matrices, ephemeral packed
+  panels, and an epoch accumulator tile;
 - `fpga/u280/connectivity.cfg`: port-to-HBM bindings; and
 - `fpga/u280/Makefile`: Vitis compile and link commands.
 
@@ -59,6 +66,11 @@ device index `0`, the example accepts a BDF such as `0000:65:00.1`.
 
 Successful output shows a different device address for each class followed by
 verification of 1 MiB after two migrations. Exact addresses vary by run.
+
+Build the complete measurement programs with `make RTMEM_ENABLE_XRT=1
+xrt-experiments`. `xrt_migration_benchmark` records raw and summarized
+migration timings; `xrt_blocked_matmul` exercises the three-class tiled
+dataflow. See `experiments.md` for commands and interpretation rules.
 
 ## Application API
 

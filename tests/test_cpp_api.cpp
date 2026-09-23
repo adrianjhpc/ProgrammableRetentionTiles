@@ -39,6 +39,7 @@ int main() {
     const auto stats = runtime.stats();
     assert(stats.promotions == 1);
     assert(stats.allocations >= 2);
+    const auto backend_stats = runtime.backend_stats();
+    assert(backend_stats.struct_size == sizeof(backend_stats));
     return 0;
 }
-

@@ -27,7 +27,19 @@ output using the hint and oracle policies. The individual commands are:
 ./build/retention_sim --trace build/matmul.rttrace --policy epoch
 ./build/retention_sim --trace build/matmul.rttrace --policy durable
 ./build/retention_sim --trace build/matmul.rttrace --policy oracle
+./build/retention_sim --trace build/matmul.rttrace --policy refresh
+./build/retention_sim --trace build/matmul.rttrace --policy adaptive
 ```
+
+For a matrix kernel whose dataflow is explicitly shaped around retention
+classes, run:
+
+```sh
+make blocked-matmul
+```
+
+That benchmark uses durable backing matrices, an epoch accumulator tile, and
+ephemeral packed panels. See `blocked_matmul.md` for details.
 
 For a larger benchmark, select a higher-capacity device profile:
 
@@ -43,6 +55,8 @@ For a larger benchmark, select a higher-capacity device profile:
 | `epoch` | Places every buffer in the middle class |
 | `durable` | Places every buffer in the strongest class |
 | `oracle` | Uses the complete trace to choose a conservative weakest class per buffer |
+| `refresh` | Follows hints and refreshes initialized lines before a required read |
+| `adaptive` | Follows hints, falls back to stronger banks on capacity pressure, and promotes or refreshes before a required read |
 
 Oracle placement accounts for the maximum modeled access latency while
 estimating data age. It is deliberately conservative and is a comparison bound,
@@ -124,9 +138,10 @@ HINT sequence tick thread buffer class
 FREE sequence tick thread buffer
 ```
 
-Sequence numbers establish global event order. Runtime ticks preserve capture
-metadata; replay time is advanced by memory operations and explicit `COMPUTE`
-events. Names are converted to whitespace-free tokens.
+Sequence numbers establish deterministic event processing order. Runtime ticks
+are earliest issue times. Replay maintains a ready time per `(thread, stream)`;
+memory channels may overlap independent streams, while barriers fence all
+known streams and banks. Names are converted to whitespace-free tokens.
 
 `ALLOC` and `FREE` are emitted automatically. An application reclassification
 request is recorded as a hint rather than a mandatory migration, allowing fixed
@@ -152,7 +167,11 @@ same trace.
 
 The memory model then reports total cycles, reads, writes, refreshes,
 migrations, expirations, capacity failures, and energy in picojoules. A replay
-is marked `SAFE` only when `unsafe_accesses` is zero.
+is marked `SAFE` only when `unsafe_accesses` is zero. Unsafe runs also report
+`performance_metrics_valid=false`; their partial cycle and energy counters are
+diagnostic and must not be used in performance comparisons. Add
+`--require-safe` to make an unsafe workload replay exit with status 3. Add
+`--json FILE` to create a versioned machine-readable report.
 
 ## Device profiles
 
@@ -172,12 +191,36 @@ be replayed against alternative SST-RAM assumptions without recompiling the
 simulator. The supplied values are illustrative and are not measured device
 characteristics.
 
+Evidence runs should use `RTMEM_PROFILE 2`, which requires provenance and adds
+explicit overhead and concurrency fields:
+
+```text
+RTMEM_PROFILE 2
+META profile_id cited-device-model-v1
+META source doi_or_repository_identifier
+META tick_ns 1.0
+META line_bytes 64
+META controller_access_pj 0.20
+META metadata_access_pj 0.05
+META ecc_read_pj 0.10
+META ecc_write_pj 0.20
+META migration_setup_pj 1.0
+META migration_setup_cycles 1
+BANK EPHEMERAL 1048576 128 2 2 1.0 2.0 0.001 2
+BANK EPOCH 1048576 4096 3 4 1.4 4.5 0.002 2
+BANK DURABLE 1048576 INFINITE 4 12 2.0 12.0 0.003 1
+```
+
+The final two bank fields are static power in mW and independent channel
+count. Profiles and traces are fingerprinted in every workload report.
+
 ## Modeling boundaries
 
 - Memory is currently modeled at 64-byte line granularity. Multiple byte
   accesses to one line are charged as separate line operations.
-- Events are replayed in global sequence order. Thread and stream identifiers
-  are retained, but overlapping issue windows are not modeled yet.
+- Trace events are processed in sequence order, with stream-ready times and
+  bank-channel queues allowing modeled overlap. Dependencies not expressed by
+  stream order or barriers cannot be inferred.
 - `COMPUTE` cycles must be supplied by the benchmark or another performance
   model; host wall-clock time is not converted automatically.
 - The supplied latency, retention, energy, and capacity values are experimental
@@ -186,5 +229,28 @@ characteristics.
   accesses are not automatically observable. Use traced accessors or compiler
   instrumentation for those workloads.
 
+See `proposal_evidence.md` for energy equations, failure semantics,
+reproducible evidence commands, and the remaining validation work.
+
 See `benchmarks.md` for BFS, hash-join, and stencil examples that assign
 different retention policies to data structures inside the same kernel.
+
+## Lifetime analysis
+
+Use `--analyze-lifetimes` to calculate each line version's conservative
+write-to-last-required-read age without selecting a placement policy:
+
+```sh
+./build/retention_sim \
+  --analyze-lifetimes build/blocked_matmul.rttrace \
+  --profile profiles/proposal_equal_resources.profile \
+  --thresholds 16,128,4096,65536 \
+  --lifetime-csv build/lifetimes.csv \
+  --lifetime-json build/lifetimes.json
+```
+
+Results are attributed to region names. Percentiles and threshold eligibility
+are weighted by write bytes, while `max_cycles` determines whether every line
+version in a structure fits a retention class. The analysis uses a conservative
+serial schedule with the slowest profile access latency; it complements, but
+does not replace, the event-driven replay timing model.

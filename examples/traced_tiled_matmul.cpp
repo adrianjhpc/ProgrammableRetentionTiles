@@ -1,6 +1,7 @@
 #include "rtmem/rtmem.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -11,19 +12,21 @@
 
 namespace {
 
-constexpr std::size_t kDefaultDimension = 16;
+constexpr std::size_t kDefaultDimension = 32;
 constexpr std::size_t kDefaultTile = 4;
-constexpr std::size_t kPanelWidth = 4;
+constexpr std::size_t kDefaultPanelWidth = 4;
 
 struct Options {
     std::string trace_path;
     std::size_t dimension = kDefaultDimension;
     std::size_t tile = kDefaultTile;
+    std::size_t panel_width = kDefaultPanelWidth;
 };
 
 void usage(const char* executable) {
     std::cerr << "usage: " << executable
-              << " [--trace FILE] [--dimension N] [--tile N]\n";
+              << " [--trace FILE] [--dimension N] [--tile N]"
+                 " [--panel-width N]\n";
 }
 
 std::size_t parse_size(const std::string& text, const char* name) {
@@ -46,6 +49,8 @@ Options parse_options(int argc, char** argv) {
             options.dimension = parse_size(argv[++index], "dimension");
         } else if (argument == "--tile" && index + 1 < argc) {
             options.tile = parse_size(argv[++index], "tile size");
+        } else if (argument == "--panel-width" && index + 1 < argc) {
+            options.panel_width = parse_size(argv[++index], "panel width");
         } else {
             throw std::invalid_argument("unknown or incomplete argument: " +
                                         argument);
@@ -53,19 +58,25 @@ Options parse_options(int argc, char** argv) {
     }
 
     if (options.dimension % options.tile != 0 ||
-        options.dimension % kPanelWidth != 0) {
+        options.dimension % options.panel_width != 0) {
         throw std::invalid_argument(
             "dimension must be a multiple of the tile and panel widths");
     }
     return options;
 }
 
-std::size_t matrix_elements(std::size_t dimension) {
-    if (dimension >
-        std::numeric_limits<std::size_t>::max() / dimension) {
-        throw std::overflow_error("matrix element count overflow");
+std::size_t checked_product(std::size_t left,
+                            std::size_t right,
+                            const char* description) {
+    if (left != 0 &&
+        right > std::numeric_limits<std::size_t>::max() / left) {
+        throw std::overflow_error(std::string(description) + " overflow");
     }
-    return dimension * dimension;
+    return left * right;
+}
+
+std::size_t matrix_elements(std::size_t dimension) {
+    return checked_product(dimension, dimension, "matrix element count");
 }
 
 std::size_t element(std::size_t row,
@@ -84,15 +95,18 @@ double b_value(std::size_t row, std::size_t column) {
     return static_cast<double>(value) * 0.125;
 }
 
-double run_blocked_matmul(rtmem::runtime& runtime,
-                          std::size_t dimension,
-                          std::size_t tile) {
+double run_tiled_matmul(rtmem::runtime& runtime,
+                        std::size_t dimension,
+                        std::size_t tile,
+                        std::size_t panel_width) {
     const auto elements = matrix_elements(dimension);
-    if (elements > std::numeric_limits<std::size_t>::max() / sizeof(double)) {
-        throw std::overflow_error("matrix byte count overflow");
-    }
-    const auto matrix_bytes = elements * sizeof(double);
+    const auto matrix_bytes = checked_product(elements,
+                                              sizeof(double),
+                                              "matrix byte count");
     const auto tile_elements = matrix_elements(tile);
+    const auto microtile_elements = checked_product(tile,
+                                                    panel_width,
+                                                    "microtile element count");
 
     rtmem::policy durable(rtmem::retention_class::durable);
     rtmem::policy epoch(rtmem::retention_class::epoch);
@@ -103,35 +117,44 @@ double run_blocked_matmul(rtmem::runtime& runtime,
     rtmem::region accumulator_region(runtime,
                                      epoch,
                                      "matmul_accumulator_tile");
-    rtmem::region a_panel_region(runtime, ephemeral, "matmul_a_panel");
-    rtmem::region b_panel_region(runtime, ephemeral, "matmul_b_panel");
+    rtmem::region a_microtile_region(runtime,
+                                    ephemeral,
+                                    "matmul_a_microtile");
+    rtmem::region b_microtile_region(runtime,
+                                    ephemeral,
+                                    "matmul_b_microtile");
 
     rtmem::buffer a_buffer(input_region, matrix_bytes, 64);
     rtmem::buffer b_buffer(input_region, matrix_bytes, 64);
     rtmem::buffer c_buffer(output_region, matrix_bytes, 64);
-    rtmem::buffer accumulator_buffer(accumulator_region,
-                                     tile_elements * sizeof(double),
-                                     64);
-    rtmem::buffer a_panel_buffer(a_panel_region,
-                                 kPanelWidth * sizeof(double),
-                                 64);
-    rtmem::buffer b_panel_buffer(b_panel_region,
-                                 kPanelWidth * sizeof(double),
-                                 64);
+    rtmem::buffer accumulator_buffer(
+        accumulator_region,
+        checked_product(tile_elements, sizeof(double), "accumulator bytes"),
+        64);
+    rtmem::buffer a_microtile_buffer(
+        a_microtile_region,
+        checked_product(microtile_elements, sizeof(double), "A microtile bytes"),
+        64);
+    rtmem::buffer b_microtile_buffer(
+        b_microtile_region,
+        checked_product(microtile_elements, sizeof(double), "B microtile bytes"),
+        64);
 
     rtmem::traced_view<double> a(a_buffer, elements);
     rtmem::traced_view<double> b(b_buffer, elements);
     rtmem::traced_view<double> c(c_buffer, elements);
     rtmem::traced_view<double> accumulator(accumulator_buffer,
                                            tile_elements);
-    rtmem::traced_view<double> a_panel(a_panel_buffer, kPanelWidth);
-    rtmem::traced_view<double> b_panel(b_panel_buffer, kPanelWidth);
+    rtmem::traced_view<double> a_microtile(a_microtile_buffer,
+                                          microtile_elements);
+    rtmem::traced_view<double> b_microtile(b_microtile_buffer,
+                                          microtile_elements);
 
     std::vector<double> reference_a(elements);
     std::vector<double> reference_b(elements);
     std::vector<double> reference_c(elements, 0.0);
 
-    runtime.trace_phase("blocked_matmul_initialize");
+    runtime.trace_phase("tiled_matmul_initialize");
     for (std::size_t row = 0; row < dimension; ++row) {
         for (std::size_t column = 0; column < dimension; ++column) {
             const auto index = element(row, column, dimension);
@@ -142,8 +165,8 @@ double run_blocked_matmul(rtmem::runtime& runtime,
         }
     }
 
-    // Compute a host-only reference. These accesses intentionally do not enter
-    // the workload trace; they validate the real blocked kernel below.
+    // The host-only reference validates the traced kernel without adding
+    // reference-computation accesses to the workload trace.
     for (std::size_t row = 0; row < dimension; ++row) {
         for (std::size_t column = 0; column < dimension; ++column) {
             double sum = 0.0;
@@ -160,47 +183,65 @@ double run_blocked_matmul(rtmem::runtime& runtime,
          row_block += tile) {
         for (std::size_t column_block = 0; column_block < dimension;
              column_block += tile) {
-            runtime.trace_phase("blocked_matmul_output_tile");
+            runtime.trace_phase("tiled_matmul_output_tile");
 
-            // This block persists only while all K panels contributing to one
-            // output tile are accumulated.
+            // The accumulator survives all K panels contributing to this C
+            // tile, then drains to durable output before being overwritten.
             for (std::size_t index = 0; index < tile_elements; ++index) {
                 accumulator.store(index, 0.0);
             }
 
             for (std::size_t inner_block = 0; inner_block < dimension;
-                 inner_block += kPanelWidth) {
+                 inner_block += panel_width) {
+                runtime.trace_phase("tiled_matmul_k_panel");
+
+                // Pack each source value once. A values are reused across all
+                // local columns; B values are reused across all local rows.
+                for (std::size_t local_row = 0; local_row < tile;
+                     ++local_row) {
+                    for (std::size_t local_inner = 0;
+                         local_inner < panel_width;
+                         ++local_inner) {
+                        a_microtile.store(
+                            element(local_row, local_inner, panel_width),
+                            a.load(element(row_block + local_row,
+                                           inner_block + local_inner,
+                                           dimension)));
+                    }
+                }
+                for (std::size_t local_inner = 0;
+                     local_inner < panel_width;
+                     ++local_inner) {
+                    for (std::size_t local_column = 0;
+                         local_column < tile;
+                         ++local_column) {
+                        b_microtile.store(
+                            element(local_inner, local_column, tile),
+                            b.load(element(inner_block + local_inner,
+                                           column_block + local_column,
+                                           dimension)));
+                    }
+                }
+
                 for (std::size_t local_row = 0; local_row < tile;
                      ++local_row) {
                     for (std::size_t local_column = 0;
                          local_column < tile;
                          ++local_column) {
-                        // Repack a short row and column panel for one partial
-                        // dot product. This deliberately bounds the panels'
-                        // live range below the EPHEMERAL retention window.
-                        for (std::size_t local_inner = 0;
-                             local_inner < kPanelWidth;
-                             ++local_inner) {
-                            a_panel.store(
-                                local_inner,
-                                a.load(element(row_block + local_row,
-                                               inner_block + local_inner,
-                                               dimension)));
-                            b_panel.store(
-                                local_inner,
-                                b.load(element(inner_block + local_inner,
-                                               column_block + local_column,
-                                               dimension)));
-                        }
-
                         const auto accumulator_index =
                             element(local_row, local_column, tile);
                         double sum = accumulator.load(accumulator_index);
                         for (std::size_t local_inner = 0;
-                             local_inner < kPanelWidth;
+                             local_inner < panel_width;
                              ++local_inner) {
-                            sum += a_panel.load(local_inner) *
-                                   b_panel.load(local_inner);
+                            sum += a_microtile.load(
+                                       element(local_row,
+                                               local_inner,
+                                               panel_width)) *
+                                   b_microtile.load(
+                                       element(local_inner,
+                                               local_column,
+                                               tile));
                             runtime.trace_compute(2);
                         }
                         accumulator.store(accumulator_index, sum);
@@ -208,11 +249,9 @@ double run_blocked_matmul(rtmem::runtime& runtime,
                 }
             }
 
-            // Once complete, drain the epoch tile immediately to durable
-            // output. The accumulator can then be overwritten for the next
-            // output tile without migration.
             for (std::size_t local_row = 0; local_row < tile; ++local_row) {
-                for (std::size_t local_column = 0; local_column < tile;
+                for (std::size_t local_column = 0;
+                     local_column < tile;
                      ++local_column) {
                     const auto value = accumulator.load(
                         element(local_row, local_column, tile));
@@ -227,21 +266,21 @@ double run_blocked_matmul(rtmem::runtime& runtime,
         }
     }
 
-    runtime.trace_phase("blocked_matmul_verify");
+    runtime.trace_phase("tiled_matmul_verify");
     double checksum = 0.0;
     for (std::size_t index = 0; index < elements; ++index) {
         const auto actual = c.load(index);
         const auto expected = reference_c[index];
         const auto tolerance = 1e-12 * (1.0 + std::fabs(expected));
         if (std::fabs(actual - expected) > tolerance) {
-            throw std::runtime_error("blocked matrix result mismatch at " +
+            throw std::runtime_error("tiled matrix result mismatch at " +
                                      std::to_string(index));
         }
         checksum += actual;
     }
 
-    b_panel.close();
-    a_panel.close();
+    b_microtile.close();
+    a_microtile.close();
     accumulator.close();
     c.close();
     b.close();
@@ -261,20 +300,45 @@ int main(int argc, char** argv) {
             runtime.attach_trace(*recorder);
         }
 
-        const auto checksum = run_blocked_matmul(runtime,
-                                                 options.dimension,
-                                                 options.tile);
-        runtime.trace_phase("blocked_matmul_complete");
+        const auto checksum = run_tiled_matmul(runtime,
+                                               options.dimension,
+                                               options.tile,
+                                               options.panel_width);
+        runtime.trace_phase("tiled_matmul_complete");
 
         if (recorder != nullptr) {
             runtime.detach_trace();
             recorder->flush();
             std::cout << "trace=" << options.trace_path << '\n';
         }
-        std::cout << "benchmark=blocked_matmul"
+
+        const auto durable_input_elements = checked_product(
+            checked_product(2,
+                            options.dimension / options.tile,
+                            "durable input read count"),
+            matrix_elements(options.dimension),
+            "durable input read count");
+        const auto durable_input_read_bytes = checked_product(
+            durable_input_elements,
+            sizeof(double),
+            "durable input read bytes");
+        const auto microtile_capacity_bytes = checked_product(
+            checked_product(2,
+                            options.tile,
+                            "microtile capacity"),
+            checked_product(options.panel_width,
+                            sizeof(double),
+                            "microtile capacity"),
+            "microtile capacity");
+
+        std::cout << "benchmark=tiled_matmul"
                   << " dimension=" << options.dimension
                   << " tile=" << options.tile
-                  << " panel_width=" << kPanelWidth
+                  << " panel_width=" << options.panel_width
+                  << " durable_input_read_bytes="
+                  << durable_input_read_bytes
+                  << " microtile_capacity_bytes="
+                  << microtile_capacity_bytes
                   << " checksum=" << checksum
                   << " status=PASS\n";
         return EXIT_SUCCESS;

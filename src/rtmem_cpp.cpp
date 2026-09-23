@@ -231,6 +231,14 @@ rt_runtime_stats runtime::stats() const {
     return result;
 }
 
+rt_backend_stats runtime::backend_stats() const {
+    rt_backend_stats result{};
+    result.struct_size = sizeof(result);
+    check(rt_runtime_get_backend_stats(state_->handle, &result),
+          state_->handle);
+    return result;
+}
+
 region::region(runtime& owner,
                const policy& selected_policy,
                std::string debug_name)

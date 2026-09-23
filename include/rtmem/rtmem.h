@@ -138,6 +138,26 @@ typedef struct rt_runtime_stats {
     uint64_t allocation_failures;
 } rt_runtime_stats;
 
+/* Backend wall-clock instrumentation. Times are host monotonic nanoseconds.
+ * On XRT, migration submit and wait are reported separately. The wait value
+ * includes device execution and any queueing observed by the host. */
+typedef struct rt_backend_stats {
+    uint32_t struct_size;
+    uint64_t allocation_calls;
+    uint64_t allocation_time_ns;
+    uint64_t host_to_device_sync_calls;
+    uint64_t host_to_device_bytes;
+    uint64_t host_to_device_time_ns;
+    uint64_t device_to_host_sync_calls;
+    uint64_t device_to_host_bytes;
+    uint64_t device_to_host_time_ns;
+    uint64_t migration_calls;
+    uint64_t migration_bytes;
+    uint64_t migration_destination_allocation_time_ns;
+    uint64_t migration_submit_time_ns;
+    uint64_t migration_wait_time_ns;
+} rt_backend_stats;
+
 typedef struct rt_region_stats {
     uint32_t struct_size;
     uint64_t allocations;
@@ -198,6 +218,8 @@ rt_status rt_runtime_poll(rt_runtime* runtime);
 rt_status rt_runtime_fence(rt_runtime* runtime);
 rt_status rt_runtime_get_stats(rt_runtime* runtime,
                                rt_runtime_stats* output_stats);
+rt_status rt_runtime_get_backend_stats(rt_runtime* runtime,
+                                       rt_backend_stats* output_stats);
 
 rt_status rt_region_create(rt_runtime* runtime,
                            const rt_policy* policy,

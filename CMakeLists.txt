@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(retention_tiles VERSION 0.5.0 LANGUAGES C CXX)
+project(retention_tiles VERSION 0.8.2 LANGUAGES C CXX)
 
 option(RTMEM_ENABLE_XRT "Build the AMD XRT backend" OFF)
 
@@ -47,6 +47,7 @@ add_executable(retention_sim
     sim/retention_model.cpp
     sim/workload_trace.cpp
     sim/device_profile.cpp
+    sim/evidence_model.cpp
 )
 target_include_directories(retention_sim PRIVATE sim)
 
@@ -77,24 +78,34 @@ add_test(NAME workload_hint_replay
 set_tests_properties(workload_hint_replay
     PROPERTIES FIXTURES_REQUIRED workload_trace)
 
+add_executable(test_hls_blocked_matmul
+    tests/test_hls_blocked_matmul.cpp
+    fpga/u280/rtmem_blocked_matmul.cpp)
+target_compile_options(test_hls_blocked_matmul PRIVATE
+    -Wno-unknown-pragmas -Wno-unused-label)
+add_test(NAME hls_blocked_matmul COMMAND test_hls_blocked_matmul)
+
 add_executable(traced_matmul examples/traced_matmul.cpp)
 target_link_libraries(traced_matmul PRIVATE rtmem)
 
 add_executable(traced_blocked_matmul examples/traced_blocked_matmul.cpp)
 target_link_libraries(traced_blocked_matmul PRIVATE rtmem)
 
+add_executable(traced_tiled_matmul examples/traced_tiled_matmul.cpp)
+target_link_libraries(traced_tiled_matmul PRIVATE rtmem)
+
 add_executable(traced_structures examples/traced_structures.cpp)
 target_link_libraries(traced_structures PRIVATE rtmem)
 
-add_executable(traced_structures_variable examples/traced_structures_variable.cpp)
+add_executable(traced_structures_variable
+    examples/traced_structures_variable.cpp)
 target_link_libraries(traced_structures_variable PRIVATE rtmem)
-
 
 foreach(BENCHMARK bfs hash_join stencil)
     set(BENCHMARK_TRACE
         ${CMAKE_CURRENT_BINARY_DIR}/${BENCHMARK}.rttrace)
     add_test(NAME benchmark_${BENCHMARK}
-        COMMAND traced_structures ${BENCHMARK} ${BENCHMARK_TRACE})
+        COMMAND traced_structures_variable ${BENCHMARK} ${BENCHMARK_TRACE})
     set_tests_properties(benchmark_${BENCHMARK}
         PROPERTIES FIXTURES_SETUP trace_${BENCHMARK})
     add_test(NAME benchmark_${BENCHMARK}_hint
@@ -111,13 +122,57 @@ endforeach()
 
 add_test(NAME benchmark_policy_metrics
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_benchmark_replay.sh
-        $<TARGET_FILE:traced_structures>
+        $<TARGET_FILE:traced_structures_variable>
         $<TARGET_FILE:retention_sim>
         ${CMAKE_CURRENT_BINARY_DIR})
+
+set(BLOCKED_MATMUL_TRACE
+    ${CMAKE_CURRENT_BINARY_DIR}/blocked_matmul.rttrace)
+add_test(NAME blocked_matmul_capture
+    COMMAND traced_blocked_matmul --trace ${BLOCKED_MATMUL_TRACE})
+set_tests_properties(blocked_matmul_capture PROPERTIES
+    FIXTURES_SETUP trace_blocked_matmul
+    PASS_REGULAR_EXPRESSION "status=PASS")
+add_test(NAME blocked_matmul_policy_metrics
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_blocked_matmul.sh
+        $<TARGET_FILE:traced_blocked_matmul>
+        $<TARGET_FILE:retention_sim>
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/profiles/large_experiment.profile)
+
+add_test(NAME tiled_matmul_reuse
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_tiled_matmul.sh
+        $<TARGET_FILE:traced_tiled_matmul>
+        $<TARGET_FILE:retention_sim>
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/profiles/large_experiment.profile)
+
+add_test(NAME evidence_replay
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_evidence_replay.sh
+        $<TARGET_FILE:retention_sim>
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/profiles
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/traces)
+
+add_test(NAME lifetime_analysis
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lifetime_analysis.sh
+        $<TARGET_FILE:retention_sim>
+        $<TARGET_FILE:traced_blocked_matmul>
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/profiles/large_experiment.profile)
 
 if(RTMEM_ENABLE_XRT)
     add_executable(xrt_vertical_slice examples/xrt_vertical_slice.cpp)
     target_link_libraries(xrt_vertical_slice PRIVATE rtmem)
+
+    add_executable(xrt_migration_benchmark
+        examples/xrt_migration_benchmark.cpp)
+    target_link_libraries(xrt_migration_benchmark PRIVATE rtmem)
+
+    add_executable(xrt_blocked_matmul examples/xrt_blocked_matmul.cpp)
+    target_include_directories(xrt_blocked_matmul PRIVATE ${XRT_INCLUDE_DIR})
+    target_link_libraries(xrt_blocked_matmul
+        PRIVATE ${XRT_COREUTIL_LIBRARY} Threads::Threads)
 endif()
 
 install(TARGETS rtmem

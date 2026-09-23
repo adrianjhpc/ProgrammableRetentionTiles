@@ -8,6 +8,22 @@
 
 namespace rtmem::internal {
 
+struct backend_statistics {
+    std::uint64_t allocation_calls = 0;
+    std::uint64_t allocation_time_ns = 0;
+    std::uint64_t host_to_device_sync_calls = 0;
+    std::uint64_t host_to_device_bytes = 0;
+    std::uint64_t host_to_device_time_ns = 0;
+    std::uint64_t device_to_host_sync_calls = 0;
+    std::uint64_t device_to_host_bytes = 0;
+    std::uint64_t device_to_host_time_ns = 0;
+    std::uint64_t migration_calls = 0;
+    std::uint64_t migration_bytes = 0;
+    std::uint64_t migration_destination_allocation_time_ns = 0;
+    std::uint64_t migration_submit_time_ns = 0;
+    std::uint64_t migration_wait_time_ns = 0;
+};
+
 class backend_allocation {
 public:
     virtual ~backend_allocation() = default;
@@ -41,6 +57,7 @@ public:
 
     virtual void flush(backend_allocation& allocation,
                        std::size_t size_bytes) = 0;
+    virtual backend_statistics statistics() const noexcept = 0;
     virtual bool supports_host_coherent_pointer() const noexcept = 0;
 };
 

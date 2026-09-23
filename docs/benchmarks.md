@@ -1,8 +1,10 @@
 # Multi-structure retention benchmarks
 
-`traced_structures` contains three small, deterministic kernels. Each kernel
-uses several data structures with different retention hints, records one
-policy-independent trace, and verifies its result before the trace is replayed.
+`traced_structures_variable` contains three small, deterministic kernels. Each
+kernel uses several data structures with different retention hints, records
+one policy-independent trace, and verifies its result before the trace is
+replayed. The repository-specific `traced_structures` executable remains
+available as an all-durable BFS comparison.
 
 | Kernel | Data structure | Hint | Reason |
 |---|---|---|---|
@@ -41,7 +43,7 @@ does not rerun the C++ algorithm.
 To run one experiment manually:
 
 ```sh
-./build/traced_structures bfs build/bfs.rttrace
+./build/traced_structures_variable bfs build/bfs.rttrace
 ./build/retention_sim --trace build/bfs.rttrace --policy hint
 ./build/retention_sim --trace build/bfs.rttrace --policy durable
 ./build/retention_sim --trace build/bfs.rttrace --policy oracle
@@ -50,9 +52,9 @@ To run one experiment manually:
 Run the algorithms without recording or simulation with:
 
 ```sh
-./build/traced_structures bfs
-./build/traced_structures hash_join
-./build/traced_structures stencil
+./build/traced_structures_variable bfs
+./build/traced_structures_variable hash_join
+./build/traced_structures_variable stencil
 ```
 
 Each command prints a deterministic checksum and `status=PASS` after checking
@@ -116,3 +118,11 @@ in replay output.
 
 Keep correctness checking inside the benchmark. The replay engine models the
 recorded events; it does not execute or validate the original algorithm.
+
+## Blocked matrix multiplication
+
+`traced_blocked_matmul` is a larger lifetime-transformation example. Rather
+than applying a weaker hint to the complete matrices, it keeps their durable
+backing storage and introduces ephemeral packed row/column panels plus an epoch
+output accumulator tile. Run `make blocked-matmul` for its policy comparison.
+See `blocked_matmul.md` for the detailed dataflow and default results.

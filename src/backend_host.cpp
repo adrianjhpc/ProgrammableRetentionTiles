@@ -85,6 +85,10 @@ public:
         std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 
+    backend_statistics statistics() const noexcept override {
+        return {};
+    }
+
     bool supports_host_coherent_pointer() const noexcept override {
         return true;
     }

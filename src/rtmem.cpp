@@ -406,28 +406,25 @@ rt_status create_runtime(const rt_runtime_options* options,
     }
 
     try {
-    auto runtime = std::make_unique<rt_runtime>();
-    runtime->options = selected;
-
-    if (selected.backend == RT_BACKEND_XRT) {
-        runtime->backend =
-            rtmem::internal::make_xrt_backend(*xrt_options);
-    } else {
-        runtime->backend = rtmem::internal::make_host_backend();
+        auto runtime = std::make_unique<rt_runtime>();
+        runtime->options = selected;
+        if (selected.backend == RT_BACKEND_XRT) {
+            runtime->backend = rtmem::internal::make_xrt_backend(*xrt_options);
+        } else {
+            runtime->backend = rtmem::internal::make_host_backend();
+        }
+        runtime->start_time = std::chrono::steady_clock::now();
+        runtime->stats.struct_size = sizeof(rt_runtime_stats);
+        *output_runtime = runtime.release();
+        return RT_OK;
+    } catch (const std::bad_alloc&) {
+        return RT_ERROR_NO_MEMORY;
+    } catch (const std::exception& exception) {
+        std::fprintf(stderr,
+                     "XRT backend initialization failed: %s\n",
+                     exception.what());
+        return RT_ERROR_BACKEND;
     }
-
-    runtime->start_time = std::chrono::steady_clock::now();
-    runtime->stats.struct_size = sizeof(rt_runtime_stats);
-    *output_runtime = runtime.release();
-    return RT_OK;
-} catch (const std::bad_alloc&) {
-    return RT_ERROR_NO_MEMORY;
-} catch (const std::exception& exception) {
-    std::fprintf(stderr,
-                 "XRT backend initialization failed: %s\n",
-                 exception.what());
-    return RT_ERROR_BACKEND;
-}
 }
 
 }  // namespace
@@ -805,6 +802,38 @@ rt_status rt_runtime_get_stats(rt_runtime* runtime,
     std::lock_guard<std::mutex> lock(runtime->mutex);
     *output_stats = runtime->stats;
     output_stats->struct_size = sizeof(rt_runtime_stats);
+    return RT_OK;
+}
+
+rt_status rt_runtime_get_backend_stats(rt_runtime* runtime,
+                                       rt_backend_stats* output_stats) {
+    if (runtime == nullptr || output_stats == nullptr ||
+        output_stats->struct_size < sizeof(rt_backend_stats)) {
+        return RT_ERROR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(runtime->mutex);
+    const auto source = runtime->backend->statistics();
+    std::memset(output_stats, 0, sizeof(*output_stats));
+    output_stats->struct_size = sizeof(*output_stats);
+    output_stats->allocation_calls = source.allocation_calls;
+    output_stats->allocation_time_ns = source.allocation_time_ns;
+    output_stats->host_to_device_sync_calls =
+        source.host_to_device_sync_calls;
+    output_stats->host_to_device_bytes = source.host_to_device_bytes;
+    output_stats->host_to_device_time_ns =
+        source.host_to_device_time_ns;
+    output_stats->device_to_host_sync_calls =
+        source.device_to_host_sync_calls;
+    output_stats->device_to_host_bytes = source.device_to_host_bytes;
+    output_stats->device_to_host_time_ns =
+        source.device_to_host_time_ns;
+    output_stats->migration_calls = source.migration_calls;
+    output_stats->migration_bytes = source.migration_bytes;
+    output_stats->migration_destination_allocation_time_ns =
+        source.migration_destination_allocation_time_ns;
+    output_stats->migration_submit_time_ns =
+        source.migration_submit_time_ns;
+    output_stats->migration_wait_time_ns = source.migration_wait_time_ns;
     return RT_OK;
 }
 

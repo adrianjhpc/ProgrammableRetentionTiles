@@ -15,8 +15,13 @@ programmer-visible retention classes. It provides:
 - an optional native-XRT allocation and migration backend;
 - a U280 HLS migration kernel with three independent HBM ports;
 - a policy-independent workload tracing API and replay engine; and
-- traced matrix multiplication plus BFS, hash-join, and stencil benchmarks for
+- event-driven multi-stream replay, explicit safety failures, maintenance
+  policies, profile provenance, energy breakdowns, and JSON evidence reports;
+- traced naive, short-panel blocked, and reuse-aware tiled matrix
+  multiplication plus BFS, hash-join, and stencil benchmarks for
   per-data-structure policy comparisons.
+- U280 migration calibration and blocked-matmul measurement programs; and
+- per-structure lifetime analysis plus reproducible retention/capacity sweeps.
 
 The FPGA model does **not** claim to reproduce MTJ device physics. It is meant
 to determine whether retention-aware placement saves enough latency, energy and
@@ -30,9 +35,16 @@ Only a C++17 compiler and `make` are required for the reference model.
 make test
 make examples
 make trace-example
+make blocked-matmul
+make tiled-matmul
+make tiled-experiments
 make benchmarks
 ./build/retention_sim --trace traces/smoke.trace
 ```
+
+For proposal-oriented reproducibility guidance and the exact boundary between
+modeled evidence and measured claims, see `docs/proposal_evidence.md`.
+For the measured and modeled experiment workflow, see `docs/experiments.md`.
 
 The public interfaces are:
 
@@ -63,18 +75,64 @@ and frees:
 The same workload can therefore be replayed without rerunning the benchmark.
 The `hint` policy follows application retention hints; fixed policies place all
 buffers in one class; `oracle` uses future trace knowledge to choose the weakest
-conservative class for each buffer. See `docs/tracing.md` for the API and trace
+conservative class for each buffer. `refresh` and `adaptive` add explicit
+maintenance. Use `--require-safe` in automated experiments and `--json FILE`
+for machine-readable reports. See `docs/tracing.md` for the API and trace
 format.
+
+### Retention-aware blocked matrix multiplication
+
+The blocked kernel keeps the complete A, B, and C matrices durable, uses an
+epoch accumulator for one output tile, and repeatedly overwrites ephemeral A
+and B panels immediately before each partial dot product:
+
+```sh
+./build/traced_blocked_matmul \
+  --trace build/blocked_matmul.rttrace \
+  --dimension 16 --tile 4
+./build/retention_sim --trace build/blocked_matmul.rttrace \
+  --policy hint --profile profiles/large_experiment.profile
+./build/retention_sim --trace build/blocked_matmul.rttrace \
+  --policy durable --profile profiles/large_experiment.profile
+```
+
+Under the supplied illustrative profile, mixed placement is safe and uses
+fewer modeled cycles and less energy than all-durable placement. All-epoch is
+still unsafe because the complete matrices remain kernel-lived. See
+`docs/blocked_matmul.md` for the dataflow, commands, results, and interpretation.
+
+### Reuse-aware tiled matrix multiplication
+
+`traced_tiled_matmul` packs an entire `tile x panel_width` A microtile and
+`panel_width x tile` B microtile once per K panel, then reuses them across the
+output tile. Increasing the tile width reduces durable input reads and
+microtile writes while increasing ephemeral capacity and required lifetime:
+
+```sh
+./build/traced_tiled_matmul \
+  --trace build/tiled_matmul.rttrace \
+  --dimension 32 --tile 4 --panel-width 4
+./build/retention_sim \
+  --analyze-lifetimes build/tiled_matmul.rttrace \
+  --profile profiles/proposal_equal_resources.profile \
+  --thresholds 64,128,512,1024,2048,4096,8192,16384,65536
+```
+
+This benchmark is intended for tile-size, capacity, and retention sweeps. See
+`docs/tiled_matmul.md` for the traffic formulas, replay commands, expected
+regression results, and interpretation cautions.
 
 ## Compare policies within one kernel
 
-`traced_structures` gives separate retention hints to the graph, mutable state,
-and scratch/output structures inside each BFS, hash-join, or stencil kernel.
-One execution creates a policy-independent trace, then the simulator replays
-that exact trace under mixed hints, fixed classes, and an oracle policy:
+`traced_structures_variable` gives separate retention hints to the graph,
+mutable state, and scratch/output structures inside each BFS, hash-join, or
+stencil kernel. `traced_structures` is retained as the repository's
+all-durable BFS comparison. One execution creates a policy-independent trace,
+then the simulator replays that exact trace under mixed hints, fixed classes,
+and an oracle policy:
 
 ```sh
-./build/traced_structures bfs build/bfs.rttrace
+./build/traced_structures_variable bfs build/bfs.rttrace
 ./build/retention_sim --trace build/bfs.rttrace --policy hint
 ./build/retention_sim --trace build/bfs.rttrace --policy epoch
 ./build/retention_sim --trace build/bfs.rttrace --policy durable
@@ -108,6 +166,18 @@ make RTMEM_ENABLE_XRT=1 xrt-example
 The last argument may be an XRT device index or a PCIe BDF. Platform names vary
 with the installed release; use the `.xpfm` available on the machine. See
 `docs/xrt_u280.md` for the API, build variables, and expected output.
+
+Build the complete U280 measurement suite with:
+
+```sh
+make RTMEM_ENABLE_XRT=1 xrt-experiments
+```
+
+This adds `xrt_migration_benchmark` and `xrt_blocked_matmul`. The simulator can
+also report per-structure write-to-last-read distributions with
+`--analyze-lifetimes`; `scripts/run_retention_sweep.py` runs retention,
+capacity, policy, and seed sweeps while preserving every generated profile and
+report.
 
 ### C allocator adapter
 
@@ -156,6 +226,17 @@ These are experimental parameters, not device predictions. Pass
 capacity, retention, latency, and energy fields when measured or modeled device
 data becomes available. `profiles/large_experiment.profile` keeps the same
 costs but expands capacity for larger traces.
+
+Use `profiles/proposal_equal_resources.profile` for policy comparisons that
+must keep class capacity and channel count constant. The older
+`proposal_evidence.profile` intentionally provisions two channels for the
+shorter-retention classes and therefore represents a different architecture,
+not a retention-only comparison.
+
+`RTMEM_PROFILE 2` additionally identifies the profile and its source, and can
+model controller/metadata/ECC overhead, static power, migration setup, and
+multiple bank channels. `profiles/proposal_evidence.profile` demonstrates the
+format and is explicitly marked as illustrative rather than measured.
 
 ## Legacy trace language
 

@@ -5,6 +5,7 @@
 #include <xrt/xrt_kernel.h>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -43,10 +44,7 @@ public:
               physical_size_,
               xrt::bo::flags::normal,
               group),
-          mapped_(bo_.map<void*>()) {
-        std::memset(mapped_, 0, physical_size_);
-        bo_.sync(XCL_BO_SYNC_BO_TO_DEVICE, physical_size_, 0);
-    }
+          mapped_(bo_.map<void*>()) {}
 
     xrt::bo& bo() noexcept { return bo_; }
     const xrt::bo& bo() const noexcept { return bo_; }
@@ -97,8 +95,19 @@ public:
         rt_retention_class retention_class,
         std::size_t size_bytes,
         std::size_t) override {
-        return std::make_unique<xrt_allocation>(
+        const auto allocation_start = clock::now();
+        auto result = std::make_unique<xrt_allocation>(
             device_, size_bytes, groups_.at(class_index(retention_class)));
+        statistics_.allocation_calls++;
+        statistics_.allocation_time_ns += elapsed_ns(allocation_start);
+
+        std::memset(result->mapped(), 0, result->physical_size());
+        const auto sync_start = clock::now();
+        result->bo().sync(XCL_BO_SYNC_BO_TO_DEVICE,
+                          result->physical_size(),
+                          0);
+        record_host_to_device(result->physical_size(), sync_start);
+        return result;
     }
 
     void* map(backend_allocation& allocation,
@@ -106,8 +115,10 @@ public:
               std::size_t size_bytes) override {
         auto& selected = as_xrt(allocation);
         if ((flags & RT_MAP_READ) != 0) {
+            const auto start = clock::now();
             selected.bo().sync(
                 XCL_BO_SYNC_BO_FROM_DEVICE, size_bytes, 0);
+            record_device_to_host(size_bytes, start);
         }
         return selected.mapped();
     }
@@ -116,8 +127,10 @@ public:
                std::uint32_t flags,
                std::size_t size_bytes) override {
         if ((flags & RT_MAP_WRITE) != 0) {
+            const auto start = clock::now();
             as_xrt(allocation).bo().sync(
                 XCL_BO_SYNC_BO_TO_DEVICE, size_bytes, 0);
+            record_host_to_device(size_bytes, start);
         }
     }
 
@@ -132,7 +145,17 @@ public:
         rt_retention_class destination_class,
         std::size_t size_bytes,
         std::size_t alignment) override {
-        auto destination = allocate(destination_class, size_bytes, alignment);
+        (void)alignment;
+        // The migration kernel overwrites every padded destination word. Do
+        // not zero-fill or upload the destination first: that would charge an
+        // unrelated host-to-device transfer to every promotion.
+        const auto allocation_start = clock::now();
+        auto destination = std::make_unique<xrt_allocation>(
+            device_,
+            size_bytes,
+            groups_.at(class_index(destination_class)));
+        statistics_.migration_destination_allocation_time_ns +=
+            elapsed_ns(allocation_start);
         auto& source_xrt = as_xrt(source);
         auto& destination_xrt = as_xrt(*destination);
 
@@ -141,21 +164,34 @@ public:
         arguments[class_index(source_class)] = &source_xrt.bo();
         arguments[class_index(destination_class)] = &destination_xrt.bo();
 
-        auto run = kernel_(*arguments[0],
-                           *arguments[1],
-                           *arguments[2],
-                           static_cast<std::uint64_t>(
-                               destination_xrt.physical_size() / kWordBytes),
-                           static_cast<std::uint32_t>(source_class),
-                           static_cast<std::uint32_t>(destination_class));
+        const auto submit_start = clock::now();
+        auto run = kernel_(
+            *arguments[0],
+            *arguments[1],
+            *arguments[2],
+            static_cast<std::uint64_t>(
+                destination_xrt.physical_size() / kWordBytes),
+            static_cast<std::uint32_t>(source_class),
+            static_cast<std::uint32_t>(destination_class));
+        statistics_.migration_submit_time_ns += elapsed_ns(submit_start);
+        const auto wait_start = clock::now();
         run.wait();
+        statistics_.migration_wait_time_ns += elapsed_ns(wait_start);
+        statistics_.migration_calls++;
+        statistics_.migration_bytes += size_bytes;
         return destination;
     }
 
     void flush(backend_allocation& allocation,
                std::size_t size_bytes) override {
+        const auto start = clock::now();
         as_xrt(allocation).bo().sync(
             XCL_BO_SYNC_BO_TO_DEVICE, size_bytes, 0);
+        record_host_to_device(size_bytes, start);
+    }
+
+    backend_statistics statistics() const noexcept override {
+        return statistics_;
     }
 
     bool supports_host_coherent_pointer() const noexcept override {
@@ -163,6 +199,29 @@ public:
     }
 
 private:
+    using clock = std::chrono::steady_clock;
+
+    static std::uint64_t elapsed_ns(clock::time_point start) {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clock::now() - start)
+                .count());
+    }
+
+    void record_host_to_device(std::size_t bytes,
+                               clock::time_point start) {
+        statistics_.host_to_device_sync_calls++;
+        statistics_.host_to_device_bytes += bytes;
+        statistics_.host_to_device_time_ns += elapsed_ns(start);
+    }
+
+    void record_device_to_host(std::size_t bytes,
+                               clock::time_point start) {
+        statistics_.device_to_host_sync_calls++;
+        statistics_.device_to_host_bytes += bytes;
+        statistics_.device_to_host_time_ns += elapsed_ns(start);
+    }
+
     static xrt::device open_device(const rt_xrt_options& options) {
         if (options.device_bdf != nullptr && options.device_bdf[0] != '\0') {
             return xrt::device(std::string(options.device_bdf));
@@ -175,6 +234,7 @@ private:
     xrt::kernel kernel_;
     std::array<xrt::memory_group, RT_CLASS_COUNT> groups_{};
     std::array<std::unique_ptr<xrt::bo>, RT_CLASS_COUNT> dummies_{};
+    backend_statistics statistics_{};
 };
 
 }  // namespace
@@ -184,4 +244,3 @@ std::unique_ptr<backend> make_xrt_backend(const rt_xrt_options& options) {
 }
 
 }  // namespace rtmem::internal
-

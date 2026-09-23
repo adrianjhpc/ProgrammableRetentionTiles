@@ -115,6 +115,7 @@ public:
                        std::uint32_t stream_id = 0);
     std::uint64_t now() const;
     rt_runtime_stats stats() const;
+    rt_backend_stats backend_stats() const;
 
 private:
     std::shared_ptr<detail::runtime_state> state_;

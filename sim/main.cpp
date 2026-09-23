@@ -16,6 +16,9 @@ using rtmem::RetentionClass;
 using rtmem::RetentionMemory;
 
 std::uint64_t parse_number(const std::string& text) {
+    if (text.empty() || text.front() == '-') {
+        throw std::invalid_argument("invalid number: " + text);
+    }
     std::size_t consumed = 0;
     const auto value = std::stoull(text, &consumed, 0);
     if (consumed != text.size()) {
@@ -214,9 +217,30 @@ bool self_test() {
 
 void usage(const char* executable) {
     std::cerr << "usage: " << executable
-              << " --self-test | --trace FILE [--mode deterministic|stochastic]"
-                 " [--seed N] [--policy hint|ephemeral|epoch|durable|oracle]"
-                 " [--profile FILE]\n";
+              << " --self-test | --trace FILE | --analyze-lifetimes FILE"
+                 " [--mode deterministic|stochastic]"
+                 " [--seed N]"
+                 " [--policy hint|ephemeral|epoch|durable|oracle|refresh|adaptive]"
+                 " [--profile FILE] [--maintenance-guard CYCLES]"
+                 " [--json FILE] [--require-safe]"
+                 " [--thresholds CYCLES,...] [--lifetime-csv FILE]"
+                 " [--lifetime-json FILE]\n";
+}
+
+std::vector<std::uint64_t> parse_numbers(const std::string& text) {
+    std::vector<std::uint64_t> result;
+    std::istringstream input(text);
+    std::string item;
+    while (std::getline(input, item, ',')) {
+        if (item.empty()) {
+            throw std::invalid_argument("empty threshold");
+        }
+        result.push_back(parse_number(item));
+    }
+    if (result.empty()) {
+        throw std::invalid_argument("empty threshold list");
+    }
+    return result;
 }
 
 }  // namespace
@@ -227,6 +251,9 @@ int main(int argc, char** argv) {
     std::uint64_t seed = 1;
     rtmem::ReplayPolicy policy = rtmem::ReplayPolicy::Hint;
     std::string profile_path;
+    rtmem::ReplayOptions replay_options;
+    rtmem::LifetimeAnalysisOptions lifetime_options;
+    std::string lifetime_trace_path;
     bool run_self_test = false;
 
     for (int index = 1; index < argc; ++index) {
@@ -235,6 +262,8 @@ int main(int argc, char** argv) {
             run_self_test = true;
         } else if (argument == "--trace" && index + 1 < argc) {
             trace_path = argv[++index];
+        } else if (argument == "--analyze-lifetimes" && index + 1 < argc) {
+            lifetime_trace_path = argv[++index];
         } else if (argument == "--mode" && index + 1 < argc) {
             const std::string selected = argv[++index];
             if (selected == "deterministic") {
@@ -251,6 +280,20 @@ int main(int argc, char** argv) {
             policy = rtmem::parse_replay_policy(argv[++index]);
         } else if (argument == "--profile" && index + 1 < argc) {
             profile_path = argv[++index];
+        } else if (argument == "--maintenance-guard" &&
+                   index + 1 < argc) {
+            replay_options.maintenance_guard_cycles =
+                parse_number(argv[++index]);
+        } else if (argument == "--json" && index + 1 < argc) {
+            replay_options.json_path = argv[++index];
+        } else if (argument == "--require-safe") {
+            replay_options.require_safe = true;
+        } else if (argument == "--thresholds" && index + 1 < argc) {
+            lifetime_options.thresholds = parse_numbers(argv[++index]);
+        } else if (argument == "--lifetime-csv" && index + 1 < argc) {
+            lifetime_options.csv_path = argv[++index];
+        } else if (argument == "--lifetime-json" && index + 1 < argc) {
+            lifetime_options.json_path = argv[++index];
         } else {
             usage(argv[0]);
             return 2;
@@ -261,22 +304,42 @@ int main(int argc, char** argv) {
         if (run_self_test) {
             return self_test() ? 0 : 1;
         }
-        if (!trace_path.empty()) {
-            const auto configs = profile_path.empty()
-                                     ? rtmem::default_bank_configs()
-                                     : rtmem::load_device_profile(profile_path);
-            if (rtmem::is_workload_trace(trace_path)) {
-                return rtmem::run_workload_trace(trace_path,
-                                                 policy,
-                                                 mode,
-                                                 seed,
-                                                 configs,
-                                                 std::cout,
-                                                 std::cerr)
-                           ? 0
-                           : 1;
+        const auto profile = profile_path.empty()
+                                 ? rtmem::default_device_profile()
+                                 : rtmem::load_device_profile(profile_path);
+        if (!lifetime_trace_path.empty()) {
+            if (!trace_path.empty()) {
+                throw std::invalid_argument(
+                    "--trace and --analyze-lifetimes are mutually exclusive");
             }
-            return run_trace(trace_path, mode, seed, configs) ? 0 : 1;
+            return rtmem::analyze_workload_lifetimes(lifetime_trace_path,
+                                                      profile,
+                                                      lifetime_options,
+                                                      std::cout,
+                                                      std::cerr)
+                       ? 0
+                       : 1;
+        }
+        if (!trace_path.empty()) {
+            if (rtmem::is_workload_trace(trace_path)) {
+                const auto outcome = rtmem::run_workload_trace(
+                    trace_path,
+                    policy,
+                    mode,
+                    seed,
+                    profile,
+                    replay_options,
+                    std::cout,
+                    std::cerr);
+                if (!outcome.completed) {
+                    return 1;
+                }
+                if (replay_options.require_safe && !outcome.safe) {
+                    return 3;
+                }
+                return 0;
+            }
+            return run_trace(trace_path, mode, seed, profile.banks) ? 0 : 1;
         }
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
